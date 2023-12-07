@@ -37,6 +37,9 @@ default_targets="
     sidecar-shim
     disks-images-provider
     libguestfs-tools
+    network-slirp-binding
+    network-passt-binding
+    network-vdpa-binding
 "
 
 case ${ARCHITECTURE} in
