@@ -50,6 +50,10 @@ type PodIsolationDetector interface {
 
 	DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (IsolationResult, error)
 
+	// Allowlist allows specifying cgroup controller which should be considered to detect the cgroup slice
+	// It returns a PodIsolationDetector to allow configuring the PodIsolationDetector via the builder pattern.
+	Allowlist(controller []string) PodIsolationDetector
+
 	// Adjust system resources to run the passed VM
 	AdjustResources(vm *v1.VirtualMachineInstance, additionalOverheadRatio *string) error
 }
@@ -57,14 +61,16 @@ type PodIsolationDetector interface {
 const isolationDialTimeout = 5
 
 type socketBasedIsolationDetector struct {
-	socketDir string
+	socketDir  string
+	controller []string
 }
 
 // NewSocketBasedIsolationDetector takes socketDir and creates a socket based IsolationDetector
 // It returns a PodIsolationDetector which detects pid, cgroups and namespaces of the socket owner.
 func NewSocketBasedIsolationDetector(socketDir string) PodIsolationDetector {
 	return &socketBasedIsolationDetector{
-		socketDir: socketDir,
+		socketDir:  socketDir,
+		controller: []string{"devices"},
 	}
 }
 
@@ -79,19 +85,26 @@ func (s *socketBasedIsolationDetector) Detect(vm *v1.VirtualMachineInstance) (Is
 }
 
 func (s *socketBasedIsolationDetector) DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (IsolationResult, error) {
-	pid, err := s.getPid(socket)
-	if err != nil {
+	var pid int
+	var ppid int
+	var err error
+
+	if pid, err = s.getPid(socket); err != nil {
 		log.Log.Object(vm).Reason(err).Errorf("Could not get owner Pid of socket %s", socket)
 		return nil, err
 	}
 
-	ppid, err := getPPid(pid)
-	if err != nil {
+	if ppid, err = getPPid(pid); err != nil {
 		log.Log.Object(vm).Reason(err).Errorf("Could not get owner PPid of socket %s", socket)
 		return nil, err
 	}
 
 	return NewIsolationResult(pid, ppid), nil
+}
+
+func (s *socketBasedIsolationDetector) Allowlist(controller []string) PodIsolationDetector {
+	s.controller = controller
+	return s
 }
 
 func (s *socketBasedIsolationDetector) AdjustResources(vm *v1.VirtualMachineInstance, additionalOverheadRatio *string) error {
@@ -129,7 +142,7 @@ func (s *socketBasedIsolationDetector) AdjustResources(vm *v1.VirtualMachineInst
 		vmiMemoryReq := vm.Spec.Domain.Resources.Requests.Memory()
 		memlockSize.Add(*resource.NewScaledQuantity(vmiMemoryReq.ScaledValue(resource.Kilo), resource.Kilo))
 
-		err = setProcessMemoryLockRLimit(process.Pid(), memlockSize.Value())
+		err = setProcessMemoryLockRLimit(process.Pid(), memlockSize.Value()*2)
 		if err != nil {
 			return fmt.Errorf("failed to set process %d memlock rlimit to %d: %v", process.Pid(), memlockSize.Value(), err)
 		}

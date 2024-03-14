@@ -63,9 +63,9 @@ modprobe vhost-vdpa
 modprobe mlx5-vdpa
 
 echo 0 > /sys/class/net/ens1f0np0/device/sriov_numvfs
-echo 2 > /sys/class/net/ens1f0np0/device/sriov_numvfs
+echo 1 > /sys/class/net/ens1f0np0/device/sriov_numvfs
 vdpa dev add name vdpa:0000:65:00.2 mgmtdev pci/0000:65:00.2
-vdpa dev add name vdpa:0000:65:00.3 mgmtdev pci/0000:65:00.3
+#vdpa dev add name vdpa:0000:65:00.3 mgmtdev pci/0000:65:00.3
 
 ## Move SR-IOV Physical Functions to worker nodes
 PFS_IN_USE=""
