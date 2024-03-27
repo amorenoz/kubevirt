@@ -198,6 +198,8 @@ func sortCallbacksPerHookPoint(callbacksPerHookPoint map[string][]*callBackClien
 }
 
 func (m *hookManager) OnDefineDomain(domainSpec *virtwrapApi.DomainSpec, vmi *v1.VirtualMachineInstance) (string, error) {
+	deviceInfo := os.Getenv("PCIDEVICE_KUBEVIRT_IO_SRIOV_NET_INFO")
+	log.Log.Infof("OnDefineDomain deviceInfo: %s", deviceInfo)
 	domainSpecXML, err := xml.MarshalIndent(domainSpec, "", "\t")
 	if err != nil {
 		return "", fmt.Errorf("Failed to marshal domain spec: %v", domainSpec)
@@ -214,7 +216,7 @@ func (m *hookManager) OnDefineDomain(domainSpec *virtwrapApi.DomainSpec, vmi *v1
 	}
 
 	for _, callback := range callbacks {
-		domainSpecXML, err = m.onDefineDomainCallback(callback, domainSpecXML, vmiJSON)
+		domainSpecXML, err = m.onDefineDomainCallback(callback, domainSpecXML, vmiJSON, deviceInfo)
 		if err != nil {
 			return "", err
 		}
@@ -223,7 +225,7 @@ func (m *hookManager) OnDefineDomain(domainSpec *virtwrapApi.DomainSpec, vmi *v1
 	return string(domainSpecXML), nil
 }
 
-func (m *hookManager) onDefineDomainCallback(callback *callBackClient, domainSpecXML, vmiJSON []byte) ([]byte, error) {
+func (m *hookManager) onDefineDomainCallback(callback *callBackClient, domainSpecXML, vmiJSON []byte, deviceInfo string) ([]byte, error) {
 	conn, err := grpcutil.DialSocketWithTimeout(callback.SocketPath, 1)
 	if err != nil {
 		log.Log.Reason(err).Errorf(dialSockErr, callback.SocketPath)
@@ -238,8 +240,9 @@ func (m *hookManager) onDefineDomainCallback(callback *callBackClient, domainSpe
 	case hooksV1alpha1.Version:
 		client := hooksV1alpha1.NewCallbacksClient(conn)
 		result, err := client.OnDefineDomain(ctx, &hooksV1alpha1.OnDefineDomainParams{
-			DomainXML: domainSpecXML,
-			Vmi:       vmiJSON,
+			DomainXML:  domainSpecXML,
+			Vmi:        vmiJSON,
+			DeviceInfo: deviceInfo,
 		})
 		if err != nil {
 			log.Log.Reason(err).Error("Failed to call OnDefineDomain")
@@ -249,8 +252,9 @@ func (m *hookManager) onDefineDomainCallback(callback *callBackClient, domainSpe
 	case hooksV1alpha2.Version:
 		client := hooksV1alpha2.NewCallbacksClient(conn)
 		result, err := client.OnDefineDomain(ctx, &hooksV1alpha2.OnDefineDomainParams{
-			DomainXML: domainSpecXML,
-			Vmi:       vmiJSON,
+			DomainXML:  domainSpecXML,
+			Vmi:        vmiJSON,
+			DeviceInfo: deviceInfo,
 		})
 		if err != nil {
 			log.Log.Reason(err).Error("Failed to call OnDefineDomain")

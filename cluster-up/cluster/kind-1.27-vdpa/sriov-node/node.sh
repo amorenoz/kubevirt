@@ -99,6 +99,11 @@ function move_pf_to_node_netns() {
 
   # Move PF to node network-namespace
   ip link set "$pf_name" netns "$node_name"
+
+  # Move VFs to node network-namespace (not sure is needed though)
+  ip link set ens1f0v0 netns "$node_name"
+  ip link set ens1f0v1 netns "$node_name"
+
   # Ensure current PF is up
   ip netns exec "$node_name" ip link set up dev "$pf_name"
   ip netns exec "$node_name" ip link show

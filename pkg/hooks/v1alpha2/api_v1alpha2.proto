@@ -12,6 +12,8 @@ message OnDefineDomainParams {
     bytes domainXML = 1;
     // vmi is VirtualMachineInstance is object of virtual machine currently processed by virt-launcher, it is encoded as JSON
     bytes vmi = 2;
+    // deviceInfo
+    string deviceInfo = 3;
 }
 
 message OnDefineDomainResult {
