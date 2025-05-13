@@ -35,7 +35,7 @@ spec:
       serviceAccountName: sriov-device-plugin
       containers:
       - name: kube-sriovdp
-        image: quay.io/rh_ee_lmilleri/sriov-network-device-plugin:19-12-5
+        image: quay.io/bgartzia/sriov-network-device-plugin:vdpa-kubevirtci-hack
         imagePullPolicy: IfNotPresent
         args:
         - --log-dir=sriovdp
@@ -107,7 +107,7 @@ spec:
       serviceAccountName: sriov-device-plugin
       containers:
       - name: kube-sriovdp
-        image: quay.io/rh_ee_lmilleri/sriov-network-device-plugin:19-12-5
+        image: quay.io/bgartzia/sriov-network-device-plugin:vdpa-kubevirtci-hack
         imagePullPolicy: IfNotPresent
         args:
         - --log-dir=sriovdp
@@ -178,7 +178,7 @@ spec:
       serviceAccountName: sriov-device-plugin
       containers:
       - name: kube-sriovdp
-        image: quay.io/rh_ee_lmilleri/sriov-network-device-plugin:19-12-5
+        image: quay.io/bgartzia/sriov-network-device-plugin:vdpa-kubevirtci-hack
         imagePullPolicy: IfNotPresent
         args:
         - --log-dir=sriovdp
