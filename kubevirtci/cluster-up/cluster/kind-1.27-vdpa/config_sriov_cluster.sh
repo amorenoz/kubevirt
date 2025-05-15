@@ -36,11 +36,6 @@ function validate_nodes_sriov_allocatable_resource() {
   done
 }
 
-function pause(){
- read -s -n 1 -p "Configure vDPA device manually the press a key . . ."
- echo ""
-}
-
 worker_nodes=($(_kubectl get nodes -l node-role.kubernetes.io/worker -o custom-columns=:.metadata.name --no-headers))
 worker_nodes_count=${#worker_nodes[@]}
 [ "$worker_nodes_count" -eq 0 ] && echo "FATAL: no worker nodes found" >&2 && exit 1
@@ -73,8 +68,6 @@ node::configure_sriov_pfs "${worker_nodes[*]}" "${pfs_names[*]}" "$PF_COUNT_PER_
 
 ## Create VFs and configure their drivers on each SR-IOV node
 #node::configure_sriov_vfs "${worker_nodes[*]}" "$VFS_DRIVER" "$VFS_DRIVER_KMODULE" "$VFS_COUNT"
-
-#pause
 
 ## Deploy Multus and SRIOV components
 sriov_components::deploy_multus
