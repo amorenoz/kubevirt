@@ -13,6 +13,14 @@ else
     export HOST_PORT=$ALTERNATE_HOST_PORT
 fi
 
+function calculate_mtu() {
+    overlay_overhead=58
+    current_mtu=$(cat /sys/class/net/$(ip route | grep "default via" | head -1 | awk '{print $5}')/mtu)
+    expr $current_mtu - $overlay_overhead
+}
+
+MTU=${MTU:-$(calculate_mtu)}
+
 function print_available_nics() {
     # print hardware info for easier debugging based on logs
     echo 'Available NICs'
@@ -60,11 +68,65 @@ function deploy_sriov() {
     print_sriov_data
 }
 
+export OVNK_COMMIT=c77ee8c38c6a6d9e55131a1272db5fad5b606e44
+
+OVNK_REPO='https://github.com/ovn-org/ovn-kubernetes.git'
+CLUSTER_PATH=${CLUSTER_PATH:-"${KUBEVIRTCI_CONFIG_PATH}/${KUBEVIRT_PROVIDER}/_ovnk"}
+
+function cluster::_get_repo() {
+    git --git-dir ${CLUSTER_PATH}/.git config --get remote.origin.url
+}
+
+function cluster::_get_sha() {
+    git --git-dir ${CLUSTER_PATH}/.git rev-parse HEAD
+}
+
+function cluster::install() {
+    if [ -d ${CLUSTER_PATH} ]; then
+        if [ $(cluster::_get_repo) != ${OVNK_REPO} -o $(cluster::_get_sha) != ${OVNK_COMMIT} ]; then
+            rm -rf ${CLUSTER_PATH}
+        fi
+    fi
+
+    if [ ! -d ${CLUSTER_PATH} ]; then
+        git clone ${OVNK_REPO} ${CLUSTER_PATH}
+        (
+            cd ${CLUSTER_PATH}
+            git checkout ${OVNK_COMMIT}
+        )
+    fi
+}
+
+function prepare_config_ovn() {
+    echo "STEP: Prepare provider config"
+    cat >$KUBEVIRTCI_CONFIG_PATH/$KUBEVIRT_PROVIDER/config-provider-$KUBEVIRT_PROVIDER.sh <<EOF
+master_ip=127.0.0.1
+kubeconfig=${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubeconfig
+kubectl=kubectl
+docker_prefix=127.0.0.1:5000/kubevirt
+manifest_docker_prefix=localhost:5000/kubevirt
+EOF
+}
+
+function fetch_kind() {
+    mkdir -p $KIND_PATH
+    current_kind_version=$($KIND_PATH/kind --version |& awk '{print $3}')
+    if [[ $current_kind_version != $KIND_VERSION ]]; then
+        echo "Downloading kind v$KIND_VERSION"
+        curl -LSs https://github.com/kubernetes-sigs/kind/releases/download/v$KIND_VERSION/kind-linux-${ARCH} -o "$KIND_PATH/kind"
+        chmod +x "$KIND_PATH/kind"
+    fi
+    export PATH=$KIND_PATH:$PATH
+}
+
 function up() {
     cp $KIND_MANIFESTS_DIR/kind.yaml ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/kind.yaml
     export CONFIG_WORKER_CPU_MANAGER=true
     export CONFIG_TOPOLOGY_MANAGER_POLICY="single-numa-node"
-    kind_up
+    cluster::install
+    pushd $CLUSTER_PATH/contrib ; ./kind.sh --cluster-name $CLUSTER_NAME --multi-network-enable -mtu $MTU --local-kind-registry --enable-interconnect --num-workers $((KUBEVIRT_NUM_NODES - 1)); popd
+    cp ~/$CLUSTER_NAME.conf "${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubeconfig"
+    prepare_config_ovn
 
     configure_registry_proxy
 
