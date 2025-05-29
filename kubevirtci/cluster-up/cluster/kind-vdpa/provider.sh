@@ -116,6 +116,21 @@ function fetch_kind() {
     ln -s $KIND_PATH/kind $KIND_PATH/.kind
 }
 
+function setup_kubectl() {
+    if ${CRI_BIN} exec ${CLUSTER_NAME}-control-plane ls /usr/bin/kubectl > /dev/null; then
+        kubectl_path=/usr/bin/kubectl
+    elif ${CRI_BIN} exec ${CLUSTER_NAME}-control-plane ls /bin/kubectl > /dev/null; then
+        kubectl_path=/bin/kubectl
+    else
+        echo "Error: kubectl not found on node, exiting"
+        exit 1
+    fi
+
+    ${CRI_BIN} cp ${CLUSTER_NAME}-control-plane:$kubectl_path ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubectl
+
+    chmod u+x ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubectl
+}
+
 function up() {
     cp $KIND_MANIFESTS_DIR/kind.yaml ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/kind.yaml
     export CONFIG_WORKER_CPU_MANAGER=true
@@ -123,6 +138,7 @@ function up() {
     cluster::install
     pushd $CLUSTER_PATH/contrib ; ./kind.sh --cluster-name $CLUSTER_NAME --multi-network-enable -mtu $MTU --local-kind-registry --enable-interconnect --num-workers $((KUBEVIRT_NUM_NODES - 1)); popd
     cp ~/$CLUSTER_NAME.conf "${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubeconfig"
+    setup_kubectl
     prepare_config_ovn
 
     configure_registry_proxy
