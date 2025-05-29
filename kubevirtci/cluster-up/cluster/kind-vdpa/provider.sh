@@ -109,14 +109,11 @@ EOF
 }
 
 function fetch_kind() {
-    mkdir -p $KIND_PATH
-    current_kind_version=$($KIND_PATH/kind --version |& awk '{print $3}')
-    if [[ $current_kind_version != $KIND_VERSION ]]; then
-        echo "Downloading kind v$KIND_VERSION"
-        curl -LSs https://github.com/kubernetes-sigs/kind/releases/download/v$KIND_VERSION/kind-linux-${ARCH} -o "$KIND_PATH/kind"
-        chmod +x "$KIND_PATH/kind"
-    fi
+    _fetch_kind
+    KIND="${KUBEVIRTCI_CONFIG_PATH}"/"$KUBEVIRT_PROVIDER"/.kind
+    export KIND_PATH="${KUBEVIRTCI_CONFIG_PATH}"/"$KUBEVIRT_PROVIDER"
     export PATH=$KIND_PATH:$PATH
+    ln -s $KIND_PATH/kind $KIND_PATH/.kind
 }
 
 function up() {
