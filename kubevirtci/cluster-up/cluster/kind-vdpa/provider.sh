@@ -136,8 +136,8 @@ function up() {
     export CONFIG_TOPOLOGY_MANAGER_POLICY="single-numa-node"
     cluster::install
     pushd $CLUSTER_PATH/contrib ; ./kind.sh --cluster-name $CLUSTER_NAME --multi-network-enable -mtu $MTU --local-kind-registry --enable-interconnect --num-workers $((KUBEVIRT_NUM_NODES - 1)); popd
-    cp ~/$CLUSTER_NAME.conf "${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubeconfig"
     cp ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/_ovnk/contrib/kind-${CLUSTER_NAME}.yaml ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/kind.yaml
+    kind export kubeconfig -n $CLUSTER_NAME --kubeconfig ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/.kubeconfig
     setup_kubectl
     prepare_config_ovn
     _fix_node_labels
