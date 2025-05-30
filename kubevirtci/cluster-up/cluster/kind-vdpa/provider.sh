@@ -132,7 +132,6 @@ function setup_kubectl() {
 }
 
 function up() {
-    cp $KIND_MANIFESTS_DIR/kind.yaml ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/kind.yaml
     export CONFIG_WORKER_CPU_MANAGER=true
     export CONFIG_TOPOLOGY_MANAGER_POLICY="single-numa-node"
     cluster::install
@@ -141,6 +140,7 @@ function up() {
     cp ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/_ovnk/contrib/kind-${CLUSTER_NAME}.yaml ${KUBEVIRTCI_CONFIG_PATH}/$KUBEVIRT_PROVIDER/kind.yaml
     setup_kubectl
     prepare_config_ovn
+    _fix_node_labels
 
     configure_registry_proxy
 
