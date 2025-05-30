@@ -58,9 +58,19 @@ modprobe vhost-vdpa
 modprobe mlx5-vdpa
 
 echo 0 > /sys/class/net/ens2f0np0/device/sriov_numvfs
+ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+devlink dev eswitch set pci/0000:0d:00.0 mode switchdev
 echo 2 > /sys/class/net/ens2f0np0/device/sriov_numvfs
+# Attach representors to the worker node bridge.
+ovs-vsctl add-port br-7be9faa9aea8 ens2f0npf0vf0
+ovs-vsctl add-port br-7be9faa9aea8 ens2f0npf0vf1
+# Move representors to worker node's namespace. Is this needed?
+ip netns exec ${CLUSTER_NAME}-worker ip link set up dev ens2f0npf0vf0
+ip netns exec ${CLUSTER_NAME}-worker ip link set up dev ens2f0npf0vf1
+# Create vdpa devices
 vdpa dev add name vdpa:0000:0d:00.2 mgmtdev pci/0000:0d:00.2 mac 00:01:02:03:04:02
 vdpa dev add name vdpa:0000:0d:00.3 mgmtdev pci/0000:0d:00.3 mac 00:01:02:03:04:03
+# And give them the appropriate permissions
 chmod 0666 /dev/vhost-vdpa*
 ls -l /dev/vhost-vdpa*
 
