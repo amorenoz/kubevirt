@@ -150,7 +150,28 @@ func (p VdpaNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec) (*d
 		domainSpecCopy.Devices.Interfaces = append(domainSpecCopy.Devices.Interfaces, *generatedIface)
 	}
 
-	log.Log.Infof("vdpa interface is added to domain spec successfully: %+v", generatedIface)
+	if mb := domainSpecCopy.MemoryBacking; mb != nil {
+		if access := mb.Access; access != nil {
+			if access.Mode != "shared" {
+				log.Log.Warningf("vduse vdpa requires memoryBacking access to be shared but it's %s. Overwriting", access)
+				access.Mode = "shared"
+			}
+		} else {
+			mb.Access = &domainschema.MemoryBackingAccess{
+				Mode: "shared",
+			}
+		}
+	} else {
+		domainSpecCopy.MemoryBacking = &domainschema.MemoryBacking{
+			Access: &domainschema.MemoryBackingAccess{
+				Mode: "shared",
+			},
+		}
+	}
+
+	domainSpecCopy.MemoryBacking.Access.Mode = "shared"
+
+	log.Log.Infof("vduse vdpa interface is added to domain spec successfully: %+v", generatedIface)
 
 	return domainSpecCopy, nil
 }
