@@ -1,0 +1,43 @@
+FROM fedora:41 AS builder
+
+ARG kubevirt_version=1.6.0
+ARG kubevirt_commit=81efab9b58e44e96038c24a5d07d0947ccb99cc4
+
+RUN dnf install -y glibc-static golang gcc
+
+COPY . /src/kubevirt
+
+WORKDIR /src/kubevirt
+
+RUN KUBEVIRT_VERSION=${kubevirt_version} \
+    KUBEVIRT_SOURCE_DATE_EPOCH="$(date +%s)" \
+    KUBEVIRT_GIT_COMMIT=${kubevirt_commit} \
+    KUBEVIRT_GIT_VERSION=v${kubevirt_version} \
+    KUBEVIRT_GIT_TREE_STATE=clean \
+    GOFLAGS=-mod=vendor \
+    bash -x ./hack/build-go.sh install cmd/sidecars/network-vdpa-binding
+
+FROM fedora:41
+
+ARG kubevirt_version=1.6.0
+
+# Create non-root user
+RUN useradd -u 1001 --create-home -s /bin/bash vdpa-network-binding-plugin
+
+# arch based executables
+# move all of them in a temporary directory
+COPY --from=builder /src/kubevirt/_out/cmd/network-vdpa-binding/network-vdpa-binding-${kubevirt_version}-linux-* /tmp/network-vdpa-binding/
+
+# move only the ones that match the current architecture
+# and remove all the others
+RUN kubevirt_arch="$(uname -m | sed -r 's/(i.|x)86_/amd/' | sed 's/aarch/arm/')" && \
+    mv /tmp/network-vdpa-binding/network-vdpa-binding-${kubevirt_version}-linux-${kubevirt_arch} /usr/bin/network-vdpa-binding && \
+    rm -rf /tmp/network-vdpa-binding
+
+RUN chgrp -R 0 /home/vdpa-network-binding-plugin && \
+    chmod -R g=u /home/vdpa-network-binding-plugin
+
+
+WORKDIR /home/vdpa-network-binding-plugin
+USER 1001
+ENTRYPOINT [ "/usr/bin/network-vdpa-binding" ]
