@@ -870,9 +870,11 @@ type ACPI struct {
 }
 
 type InterfaceDriver struct {
-	Name   string `xml:"name,attr"`
-	Queues *uint  `xml:"queues,attr,omitempty"`
-	IOMMU  string `xml:"iommu,attr,omitempty"`
+	Name        string `xml:"name,attr"`
+	Queues      *uint  `xml:"queues,attr,omitempty"`
+	RXQueueSize *uint  `xml:"rx_queue_size,attr,omitempty"`
+	TXQueueSize *uint  `xml:"tx_queue_size,attr,omitempty"`
+	IOMMU       string `xml:"iommu,attr,omitempty"`
 }
 
 type LinkState struct {
@@ -903,6 +905,8 @@ type InterfaceSource struct {
 	Device  string   `xml:"dev,attr,omitempty"`
 	Bridge  string   `xml:"bridge,attr,omitempty"`
 	Mode    string   `xml:"mode,attr,omitempty"`
+	Type    string   `xml:"type,attr,omitempty"`
+	Path    string   `xml:"path,attr,omitempty"`
 	Address *Address `xml:"address,omitempty"`
 }
 
