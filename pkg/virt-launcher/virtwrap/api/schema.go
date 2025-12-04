@@ -857,7 +857,7 @@ type ACPI struct {
 }
 
 type InterfaceDriver struct {
-	Name        string `xml:"name,attr"`
+	Name        string `xml:"name,attr,omitempty"`
 	Queues      *uint  `xml:"queues,attr,omitempty"`
 	RXQueueSize *uint  `xml:"rx_queue_size,attr,omitempty"`
 	TXQueueSize *uint  `xml:"tx_queue_size,attr,omitempty"`
