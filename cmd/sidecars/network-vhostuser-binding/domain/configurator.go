@@ -46,7 +46,8 @@ const (
 	VhostUserLogFilePath = "/var/run/kubevirt/vhost-user.log"
 	// VhostUserLogFilePath path where vhost user sockets will be placed
 	// HACK! we should really find a way to get a host mount properly specified
-	VhostUserSockPath = "/var/lib/vhost_sockets"
+	VhostUserSockPath        = "/var/lib/vhost_sockets"
+	QueueSize         uint32 = 1024
 )
 
 func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, podId string) (*VhostUserNetworkConfigurator, error) {
@@ -141,6 +142,7 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 	}
 
 	vhostUserPath := p.getVhostUserPath(iface)
+	queueSize := uint(QueueSize)
 
 	return &domainschema.Interface{
 		Alias:   domainschema.NewUserDefinedAlias(iface.Name),
@@ -150,6 +152,7 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 		ACPI:    acpi,
 		Type:    "vhostuser",
 		Source:  domainschema.InterfaceSource{Type: "unix", Path: vhostUserPath, Mode: "server"},
+		Driver:  &domainschema.InterfaceDriver{TXQueueSize: &queueSize, RXQueueSize: &queueSize},
 	}, nil
 }
 
