@@ -20,6 +20,11 @@
 package domain_test
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"path"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	vmschema "kubevirt.io/api/core/v1"
@@ -29,13 +34,36 @@ import (
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
+// Helper function to compute vhost-user socket path
+func getVhostUserPath(ifaceName string) string {
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, ifaceName)
+	hashedName := fmt.Sprintf("%x", hash.Sum(nil))[:11]
+	return path.Join(domain.VhostUserSockPath, fmt.Sprintf("%s%s", "pod", hashedName))
+}
+
+// Helper function to create expected interface with common defaults
+func newExpectedInterface(name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint) *domainschema.Interface {
+	queueSize := uint(domain.QueueSize)
+	return &domainschema.Interface{
+		Alias:   domainschema.NewUserDefinedAlias(name),
+		Type:    "vhostuser",
+		Source:  domainschema.InterfaceSource{Type: "unix", Path: getVhostUserPath(name), Mode: "server"},
+		Model:   &domainschema.Model{Type: "virtio"},
+		Address: address,
+		MAC:     mac,
+		ACPI:    acpi,
+		Driver:  &domainschema.InterfaceDriver{TXQueueSize: &queueSize, RXQueueSize: &queueSize, Queues: &queues},
+	}
+}
+
 var _ = Describe("vhostuser network configurator", func() {
 	const testPodId = "test-pod-uid-12345"
 
 	Context("generate domain spec interface", func() {
 		DescribeTable("should fail to create configurator given",
 			func(ifaces []vmschema.Interface, networks []vmschema.Network) {
-				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 
 				Expect(err).To(HaveOccurred())
 			},
@@ -58,7 +86,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				PciAddress: "invalid-pci-address"}}
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
@@ -70,7 +98,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				ifaces := []vmschema.Interface{*iface}
 				networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 
-				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 				Expect(err).ToNot(HaveOccurred())
 
 				mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -79,45 +107,26 @@ var _ = Describe("vhostuser network configurator", func() {
 			},
 			Entry("vhostuser binding plugin",
 				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				&domainschema.Interface{
-					Alias:  domainschema.NewUserDefinedAlias("default"),
-					Type:   "vhostuser",
-					Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-					Model:  &domainschema.Model{Type: "virtio"},
-				},
+				newExpectedInterface("default", nil, nil, nil, 1),
 			),
 			Entry("PCI address",
 				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					PciAddress: "0000:02:02.0"},
-				&domainschema.Interface{
-					Alias:   domainschema.NewUserDefinedAlias("default"),
-					Type:    "vhostuser",
-					Source:  domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-					Model:   &domainschema.Model{Type: "virtio"},
-					Address: &domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x02", Slot: "0x02", Function: "0x0"},
-				},
+				newExpectedInterface("default",
+					&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x02", Slot: "0x02", Function: "0x0"},
+					nil, nil, 1),
 			),
 			Entry("MAC address",
 				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					MacAddress: "02:02:02:02:02:02"},
-				&domainschema.Interface{
-					Alias:  domainschema.NewUserDefinedAlias("default"),
-					Type:   "vhostuser",
-					Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-					Model:  &domainschema.Model{Type: "virtio"},
-					MAC:    &domainschema.MAC{MAC: "02:02:02:02:02:02"},
-				},
+				newExpectedInterface("default", nil,
+					&domainschema.MAC{MAC: "02:02:02:02:02:02"}, nil, 1),
 			),
 			Entry("ACPI address",
 				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					ACPIIndex: 2},
-				&domainschema.Interface{
-					Alias:  domainschema.NewUserDefinedAlias("default"),
-					Type:   "vhostuser",
-					Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-					Model:  &domainschema.Model{Type: "virtio"},
-					ACPI:   &domainschema.ACPI{Index: uint(2)},
-				},
+				newExpectedInterface("default", nil, nil,
+					&domainschema.ACPI{Index: uint(2)}, 1),
 			),
 		)
 
@@ -131,14 +140,9 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "secondary", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}},
 			}
 
-			expectedDomainIface := &domainschema.Interface{
-				Alias:  domainschema.NewUserDefinedAlias("default"),
-				Type:   "vhostuser",
-				Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-				Model:  &domainschema.Model{Type: "virtio"},
-			}
+			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{Alias: domainschema.NewUserDefinedAlias("existing-iface")}
@@ -155,14 +159,9 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			expectedDomainIface := &domainschema.Interface{
-				Alias:  domainschema.NewUserDefinedAlias("default"),
-				Type:   "vhostuser",
-				Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-				Model:  &domainschema.Model{Type: "virtio"},
-			}
+			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -178,7 +177,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -194,7 +193,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -225,30 +224,14 @@ var _ = Describe("vhostuser network configurator", func() {
 			}
 
 			expectedDomainIfaces := []domainschema.Interface{
-				{
-					Alias:  domainschema.NewUserDefinedAlias("default"),
-					Type:   "vhostuser",
-					Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-					Model:  &domainschema.Model{Type: "virtio"},
-				},
-				{
-					Alias:  domainschema.NewUserDefinedAlias("net1"),
-					Type:   "vhostuser",
-					Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/net1.sock", Mode: "server"},
-					Model:  &domainschema.Model{Type: "virtio"},
-					MAC:    &domainschema.MAC{MAC: "02:00:00:00:00:01"},
-				},
-				{
-					Alias:   domainschema.NewUserDefinedAlias("net2"),
-					Type:    "vhostuser",
-					Source:  domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/net2.sock", Mode: "server"},
-					Model:   &domainschema.Model{Type: "virtio"},
-					MAC:     &domainschema.MAC{MAC: "02:00:00:00:00:02"},
-					Address: &domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x03", Slot: "0x00", Function: "0x0"},
-				},
+				*newExpectedInterface("default", nil, nil, nil, 1),
+				*newExpectedInterface("net1", nil, &domainschema.MAC{MAC: "02:00:00:00:00:01"}, nil, 1),
+				*newExpectedInterface("net2",
+					&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x03", Slot: "0x00", Function: "0x0"},
+					&domainschema.MAC{MAC: "02:00:00:00:00:02"}, nil, 1),
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -264,7 +247,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{
@@ -277,12 +260,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				},
 			}
 
-			expectedDomainIface := &domainschema.Interface{
-				Alias:  domainschema.NewUserDefinedAlias("default"),
-				Type:   "vhostuser",
-				Source: domainschema.InterfaceSource{Type: "unix", Path: "/var/run/kubevirt-private/vmi-disks/vhost-user/test/default.sock", Mode: "server"},
-				Model:  &domainschema.Model{Type: "virtio"},
-			}
+			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
 
 			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
 			Expect(err).ToNot(HaveOccurred())
@@ -294,7 +272,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -320,7 +298,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "multus2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
 			Expect(err).ToNot(HaveOccurred())
 
 			existingBridgeIface := &domainschema.Interface{
@@ -349,6 +327,116 @@ var _ = Describe("vhostuser network configurator", func() {
 				}
 			}
 			Expect(vhostuserIfaces).To(Equal(2))
+		})
+
+		It("should set queues to 1 when multiqueue is disabled", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			Expect(err).ToNot(HaveOccurred())
+
+			testDomSpec := &domainschema.DomainSpec{
+				VCPU: &domainschema.VCPU{CPUs: 4},
+			}
+
+			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+
+			iface := mutatedDomSpec.Devices.Interfaces[0]
+			Expect(iface.Driver).ToNot(BeNil())
+			Expect(iface.Driver.Queues).ToNot(BeNil())
+			Expect(*iface.Driver.Queues).To(Equal(uint(1)))
+		})
+
+		It("should set queues to number of vCPUs when multiqueue is enabled", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 4)
+			Expect(err).ToNot(HaveOccurred())
+
+			testDomSpec := &domainschema.DomainSpec{
+				VCPU: &domainschema.VCPU{CPUs: 4},
+			}
+
+			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+
+			iface := mutatedDomSpec.Devices.Interfaces[0]
+			Expect(iface.Driver).ToNot(BeNil())
+			Expect(iface.Driver.Queues).ToNot(BeNil())
+			Expect(*iface.Driver.Queues).To(Equal(uint(4)))
+		})
+
+		It("should set queues to 1 when multiqueue is enabled but VCPU is nil", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			Expect(err).ToNot(HaveOccurred())
+
+			testDomSpec := &domainschema.DomainSpec{}
+
+			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+
+			iface := mutatedDomSpec.Devices.Interfaces[0]
+			Expect(iface.Driver).ToNot(BeNil())
+			Expect(iface.Driver.Queues).ToNot(BeNil())
+			Expect(*iface.Driver.Queues).To(Equal(uint(1)))
+		})
+
+		It("should set queue sizes to 1024", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			Expect(err).ToNot(HaveOccurred())
+
+			testDomSpec := &domainschema.DomainSpec{}
+
+			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+
+			iface := mutatedDomSpec.Devices.Interfaces[0]
+			Expect(iface.Driver).ToNot(BeNil())
+			Expect(iface.Driver.TXQueueSize).ToNot(BeNil())
+			Expect(*iface.Driver.TXQueueSize).To(Equal(uint(1024)))
+			Expect(iface.Driver.RXQueueSize).ToNot(BeNil())
+			Expect(*iface.Driver.RXQueueSize).To(Equal(uint(1024)))
+		})
+
+		It("should handle multiqueue with multiple interfaces", func() {
+			networks := []vmschema.Network{
+				*vmschema.DefaultPodNetwork(),
+				{Name: "secondary", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "sec"}}},
+			}
+			ifaces := []vmschema.Interface{
+				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "secondary", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 8)
+			Expect(err).ToNot(HaveOccurred())
+
+			testDomSpec := &domainschema.DomainSpec{
+				VCPU: &domainschema.VCPU{CPUs: 8},
+			}
+
+			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(2))
+
+			for _, iface := range mutatedDomSpec.Devices.Interfaces {
+				Expect(iface.Driver).ToNot(BeNil())
+				Expect(iface.Driver.Queues).ToNot(BeNil())
+				Expect(*iface.Driver.Queues).To(Equal(uint(8)))
+			}
 		})
 	})
 })
