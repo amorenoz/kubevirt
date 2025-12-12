@@ -77,7 +77,18 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 		return nil, fmt.Errorf("failed to find pod ID")
 	}
 
-	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, podID)
+	queues := uint(1)
+	if mq := vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue; mq != nil && *mq {
+		// We cannot trust the CPU topology of the libvirt domain because the number
+		// of sockets gets expanded to make room for future hotplugging. So determine the
+		// number of queues from the VMI spec instead.
+		if cpuSpec := vmi.Spec.Domain.CPU; cpuSpec != nil {
+			cpu := *cpuSpec
+			queues = uint(cpu.Cores * cpu.Sockets * cpu.Threads)
+		}
+	}
+
+	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, podID, queues)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vhostuser configurator: %v", err)
 	}
