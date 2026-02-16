@@ -58,12 +58,10 @@ func newExpectedInterface(name string, address *domainschema.Address, mac *domai
 }
 
 var _ = Describe("vhostuser network configurator", func() {
-	const testPodId = "test-pod-uid-12345"
-
 	Context("generate domain spec interface", func() {
 		DescribeTable("should fail to create configurator given",
 			func(ifaces []vmschema.Interface, networks []vmschema.Network) {
-				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 
 				Expect(err).To(HaveOccurred())
 			},
@@ -86,7 +84,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				PciAddress: "invalid-pci-address"}}
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
@@ -98,7 +96,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				ifaces := []vmschema.Interface{*iface}
 				networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 
-				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 				Expect(err).ToNot(HaveOccurred())
 
 				mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -142,7 +140,7 @@ var _ = Describe("vhostuser network configurator", func() {
 
 			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{Alias: domainschema.NewUserDefinedAlias("existing-iface")}
@@ -161,7 +159,7 @@ var _ = Describe("vhostuser network configurator", func() {
 
 			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -177,7 +175,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -193,7 +191,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -231,7 +229,7 @@ var _ = Describe("vhostuser network configurator", func() {
 					&domainschema.MAC{MAC: "02:00:00:00:00:02"}, nil, 1),
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -247,7 +245,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{
@@ -272,7 +270,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -298,7 +296,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "multus2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			existingBridgeIface := &domainschema.Interface{
@@ -333,7 +331,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -354,7 +352,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 4)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 4})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -375,7 +373,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -394,7 +392,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
 			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 1)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -421,7 +419,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "secondary", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testPodId, 8)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 8})
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{

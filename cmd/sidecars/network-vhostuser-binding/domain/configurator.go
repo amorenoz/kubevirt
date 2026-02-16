@@ -36,8 +36,11 @@ import (
 
 type VhostUserNetworkConfigurator struct {
 	vhostIfaces []*vmschema.Interface
-	podId       string
-	queues      uint
+	opts        VhostUserConfiguratorOptions
+}
+
+type VhostUserConfiguratorOptions struct {
+	Queues uint
 }
 
 const (
@@ -51,7 +54,7 @@ const (
 	QueueSize         uint32 = 1024
 )
 
-func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, podId string, queues uint) (*VhostUserNetworkConfigurator, error) {
+func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, opts VhostUserConfiguratorOptions) (*VhostUserNetworkConfigurator, error) {
 
 	vhostIfaces := make([]*vmschema.Interface, 0)
 	for _, iface := range ifaces {
@@ -66,8 +69,7 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 
 	return &VhostUserNetworkConfigurator{
 		vhostIfaces: vhostIfaces,
-		podId:       podId,
-		queues:      queues,
+		opts:        opts,
 	}, nil
 }
 
@@ -75,7 +77,7 @@ func (p VhostUserNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec
 	domainSpecCopy := domainSpec.DeepCopy()
 
 	for _, vhostIface := range p.vhostIfaces {
-		log.Log.Infof("%s: generating domain interface definition. queues = %d", vhostIface.Name, p.queues)
+		log.Log.Infof("%s: generating domain interface definition. queues = %d", vhostIface.Name, p.opts.Queues)
 		generatedIface, err := p.generateDomainInterface(vhostIface)
 		if err != nil {
 			return nil, fmt.Errorf("%s: failed to generate domain interface spec for iface: %v", vhostIface.Name, err)
@@ -154,7 +156,7 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 		ACPI:    acpi,
 		Type:    "vhostuser",
 		Source:  domainschema.InterfaceSource{Type: "unix", Path: vhostUserPath, Mode: "server"},
-		Driver:  &domainschema.InterfaceDriver{TXQueueSize: &queueSize, RXQueueSize: &queueSize, Queues: &p.queues},
+		Driver:  &domainschema.InterfaceDriver{TXQueueSize: &queueSize, RXQueueSize: &queueSize, Queues: &p.opts.Queues},
 	}, nil
 }
 
