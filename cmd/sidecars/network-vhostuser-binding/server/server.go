@@ -88,7 +88,11 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 		}
 	}
 
-	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, podID, queues)
+	opts := domain.VhostUserConfiguratorOptions{
+		Queues: queues,
+	}
+
+	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vhostuser configurator: %v", err)
 	}
