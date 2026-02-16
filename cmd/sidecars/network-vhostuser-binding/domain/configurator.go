@@ -40,7 +40,8 @@ type VhostUserNetworkConfigurator struct {
 }
 
 type VhostUserConfiguratorOptions struct {
-	Queues uint
+	Queues                uint
+	UseVirtioTransitional bool
 }
 
 const (
@@ -132,7 +133,13 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 			return nil, err
 		}
 	}
-	ifaceModelType := "virtio"
+
+	var ifaceModelType string
+	if p.opts.UseVirtioTransitional {
+		ifaceModelType = "virtio-transitional"
+	} else {
+		ifaceModelType = "virtio"
+	}
 	model := &domainschema.Model{Type: ifaceModelType}
 
 	var mac *domainschema.MAC
