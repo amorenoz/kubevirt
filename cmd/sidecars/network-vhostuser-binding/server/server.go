@@ -88,8 +88,11 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 		}
 	}
 
+	useVirtioTransitional := vmi.Spec.Domain.Devices.UseVirtioTransitional != nil && *vmi.Spec.Domain.Devices.UseVirtioTransitional
+
 	opts := domain.VhostUserConfiguratorOptions{
-		Queues: queues,
+		Queues:                queues,
+		UseVirtioTransitional: useVirtioTransitional,
 	}
 
 	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, opts)

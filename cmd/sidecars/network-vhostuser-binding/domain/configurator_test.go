@@ -44,12 +44,17 @@ func getVhostUserPath(ifaceName string) string {
 
 // Helper function to create expected interface with common defaults
 func newExpectedInterface(name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint) *domainschema.Interface {
+	return newExpectedInterfaceWithModel(name, address, mac, acpi, queues, "virtio")
+}
+
+// Helper function to create expected interface with custom model type
+func newExpectedInterfaceWithModel(name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint, modelType string) *domainschema.Interface {
 	queueSize := uint(domain.QueueSize)
 	return &domainschema.Interface{
 		Alias:   domainschema.NewUserDefinedAlias(name),
 		Type:    "vhostuser",
 		Source:  domainschema.InterfaceSource{Type: "unix", Path: getVhostUserPath(name), Mode: "server"},
-		Model:   &domainschema.Model{Type: "virtio"},
+		Model:   &domainschema.Model{Type: modelType},
 		Address: address,
 		MAC:     mac,
 		ACPI:    acpi,
@@ -434,6 +439,66 @@ var _ = Describe("vhostuser network configurator", func() {
 				Expect(iface.Driver).ToNot(BeNil())
 				Expect(iface.Driver.Queues).ToNot(BeNil())
 				Expect(*iface.Driver.Queues).To(Equal(uint(8)))
+			}
+		})
+
+		It("should set model to virtio when UseVirtioTransitional is false", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{
+				Queues:                1,
+				UseVirtioTransitional: false,
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Model).ToNot(BeNil())
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Model.Type).To(Equal("virtio"))
+		})
+
+		It("should set model to virtio-transitional when UseVirtioTransitional is true", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			expectedDomainIface := newExpectedInterfaceWithModel("default", nil, nil, nil, 1, "virtio-transitional")
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{
+				Queues:                1,
+				UseVirtioTransitional: true,
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(Equal([]domainschema.Interface{*expectedDomainIface}))
+		})
+
+		It("should apply UseVirtioTransitional to all vhostuser interfaces", func() {
+			networks := []vmschema.Network{
+				*vmschema.DefaultPodNetwork(),
+				{Name: "secondary", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "sec"}}},
+			}
+			ifaces := []vmschema.Interface{
+				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "secondary", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{
+				Queues:                1,
+				UseVirtioTransitional: true,
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(2))
+
+			for _, iface := range mutatedDomSpec.Devices.Interfaces {
+				Expect(iface.Model).ToNot(BeNil())
+				Expect(iface.Model.Type).To(Equal("virtio-transitional"))
 			}
 		})
 	})
