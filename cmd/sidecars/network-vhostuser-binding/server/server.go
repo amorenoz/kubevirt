@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	vmschema "kubevirt.io/api/core/v1"
 
@@ -84,7 +85,7 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 		// number of queues from the VMI spec instead.
 		if cpuSpec := vmi.Spec.Domain.CPU; cpuSpec != nil {
 			cpu := *cpuSpec
-			queues = uint(cpu.Cores * cpu.Sockets * cpu.Threads)
+			queues = uint(math.Max(float64(cpu.Cores), 1) * math.Max(float64(cpu.Sockets), 1) * math.Max(float64(cpu.Threads), 1))
 		}
 	}
 
