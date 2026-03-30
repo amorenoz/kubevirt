@@ -47,6 +47,9 @@ type VhostUserConfiguratorOptions struct {
 	// netInfoOverride, when set, overrides the default downward API network-info
 	// file path. Intended for testing only.
 	netInfoOverride string
+	// socketDirOverride, when set, overrides VhostUserSocketDir.
+	// Intended for testing only.
+	socketDirOverride string
 }
 
 // SetNetInfoOverride overrides the default downward API network-info file path.
@@ -55,11 +58,19 @@ func (o *VhostUserConfiguratorOptions) SetNetInfoOverride(path string) {
 	o.netInfoOverride = path
 }
 
+// SetSocketDirOverride overrides the default vhost-user socket symlink directory.
+// This is intended for testing.
+func (o *VhostUserConfiguratorOptions) SetSocketDirOverride(dir string) {
+	o.socketDirOverride = dir
+}
+
 const (
 	// VhostUserPluginName vhost-user binding plugin name should be registered to Kubevirt through Kubevirt CR
 	VhostUserPluginName = "vhostuser"
 	// VhostUserLogFilePath vhost-user log file path Kubevirt consume and record
 	VhostUserLogFilePath = "/var/run/kubevirt/vhost-user.log"
+	// Directory where the binding will symlink sockets.
+	VhostUserSocketDir = "/var/run/vhost-binding/"
 	// QueueSize is the TX/RX queue size for vhost-user interfaces.
 	QueueSize uint32 = 1024
 )
@@ -142,7 +153,34 @@ func (p VhostUserNetworkConfigurator) getVhostUserPath(iface *vmschema.Interface
 	if !ok {
 		return "", fmt.Errorf("vhost user path for interface %s not found", iface.Name)
 	}
-	return sockPath, nil
+	sockFile := path.Base(sockPath)
+	sockDir := path.Dir(sockPath)
+
+	// Vhost-user socket paths might contain deployment-specific strings if they come from a DevicePlugin.
+	// These bits would change when another pod is deployed for the same VM, i.e: during live-migration, leading
+	// to a different libvirt XML. In order to avoid this, symlink the sockets to well-known paths that will
+	// remain stable across migrations.
+	socketDir := VhostUserSocketDir
+	if p.opts.socketDirOverride != "" {
+		socketDir = p.opts.socketDirOverride
+	}
+
+	if err := os.MkdirAll(socketDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create vhost-user socket directory: %w", err)
+	}
+
+	symlinkPath := path.Join(socketDir, iface.Name)
+	if _, err := os.Lstat(symlinkPath); err == nil {
+		log.Log.Warningf("Removing existing symlink for interface %s at %s", iface.Name, symlinkPath)
+		if err := os.Remove(symlinkPath); err != nil {
+			return "", fmt.Errorf("failed to remove existing symlink: %w", err)
+		}
+	}
+
+	if err := os.Symlink(sockDir, symlinkPath); err != nil {
+		return "", fmt.Errorf("failed to create symlink for socket: %w", err)
+	}
+	return path.Join(symlinkPath, sockFile), nil
 }
 
 func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.Interface) (*domainschema.Interface, error) {

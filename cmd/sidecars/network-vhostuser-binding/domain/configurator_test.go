@@ -22,6 +22,7 @@ package domain_test
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 
@@ -37,9 +38,28 @@ import (
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
-// vhostUserSocketPath returns a fake socket path for a given interface name, for use in tests.
-func vhostUserSocketPath(ifaceName string) string {
-	return fmt.Sprintf("/var/run/vhost-user/%s.sock", ifaceName)
+// randID returns a random 5-character alphanumeric string, simulating the
+// deployment-specific directory names that device plugins inject into socket paths.
+func randID() string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 5)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
+}
+
+// inputSocketPath returns a device-plugin-style socket path with a random
+// directory component, e.g. "/var/run/vhost-user/a3xZ9/vhost.sock".
+// The random segment simulates paths that change across pod deployments.
+func inputSocketPath(_ string) string {
+	return fmt.Sprintf("/var/run/vhost-user/%s/vhost.sock", randID())
+}
+
+// expectedSocketPath returns the stable socket path that should appear in the
+// domain XML after symlinking, e.g. "<socketDir>/<ifaceName>/vhost.sock".
+func expectedSocketPath(socketDir, ifaceName string) string {
+	return filepath.Join(socketDir, ifaceName, "vhost.sock")
 }
 
 func multusNetwork(name string) vmschema.Network {
@@ -62,7 +82,7 @@ func writeNetInfoFile(secondaryIfaceNames ...string) string {
 				Version: networkv1.DeviceInfoVersion,
 				VhostUser: &networkv1.VhostDevice{
 					Mode: networkv1.VhostDeviceModeClient,
-					Path: vhostUserSocketPath(name),
+					Path: inputSocketPath(name),
 				},
 			},
 		})
@@ -82,24 +102,27 @@ func writeNetInfoFileRaw(ifaces ...downwardapi.Interface) string {
 
 // testOpts builds VhostUserConfiguratorOptions with the netinfo override pointed at a
 // temp file containing valid vhost-user entries for the given interface names.
-func testOpts(queues uint, ifaceNames ...string) domain.VhostUserConfiguratorOptions {
+// It returns the opts and the socket directory used, so callers can build expected paths.
+func testOpts(queues uint, ifaceNames ...string) (domain.VhostUserConfiguratorOptions, string) {
+	socketDir := filepath.Join(GinkgoT().TempDir(), "vhost-binding")
 	opts := domain.VhostUserConfiguratorOptions{Queues: queues}
 	opts.SetNetInfoOverride(writeNetInfoFile(ifaceNames...))
-	return opts
+	opts.SetSocketDirOverride(socketDir)
+	return opts, socketDir
 }
 
 // Helper function to create expected interface with common defaults
-func newExpectedInterface(name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint) *domainschema.Interface {
-	return newExpectedInterfaceWithModel(name, address, mac, acpi, queues, "virtio")
+func newExpectedInterface(socketDir, name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint) *domainschema.Interface {
+	return newExpectedInterfaceWithModel(socketDir, name, address, mac, acpi, queues, "virtio")
 }
 
 // Helper function to create expected interface with custom model type
-func newExpectedInterfaceWithModel(name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint, modelType string) *domainschema.Interface {
+func newExpectedInterfaceWithModel(socketDir, name string, address *domainschema.Address, mac *domainschema.MAC, acpi *domainschema.ACPI, queues uint, modelType string) *domainschema.Interface {
 	queueSize := uint(domain.QueueSize)
 	return &domainschema.Interface{
 		Alias:   domainschema.NewUserDefinedAlias(name),
 		Type:    "vhostuser",
-		Source:  domainschema.InterfaceSource{Type: "unix", Path: vhostUserSocketPath(name), Mode: "server"},
+		Source:  domainschema.InterfaceSource{Type: "unix", Path: expectedSocketPath(socketDir, name), Mode: "server"},
 		Model:   &domainschema.Model{Type: modelType},
 		Address: address,
 		MAC:     mac,
@@ -112,7 +135,8 @@ var _ = Describe("vhostuser network configurator", func() {
 	Context("generate domain spec interface", func() {
 		DescribeTable("should fail to create configurator given",
 			func(ifaces []vmschema.Interface, networks []vmschema.Network) {
-				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+				opts, _ := testOpts(1, "net1")
+				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 
 				Expect(err).To(HaveOccurred())
 			},
@@ -137,7 +161,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			}
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
@@ -145,39 +170,48 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		DescribeTable("should add interface to domain spec given iface with",
-			func(iface *vmschema.Interface, expectedDomainIface *domainschema.Interface) {
+			func(iface *vmschema.Interface, buildExpected func(socketDir string) *domainschema.Interface) {
 				ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), *iface}
 				networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork(iface.Name)}
 
-				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, iface.Name))
+				opts, socketDir := testOpts(1, iface.Name)
+				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 				Expect(err).ToNot(HaveOccurred())
 
 				mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
 				Expect(err).ToNot(HaveOccurred())
-				Expect(mutatedDomSpec.Devices.Interfaces).To(Equal([]domainschema.Interface{*expectedDomainIface}))
+				Expect(mutatedDomSpec.Devices.Interfaces).To(Equal([]domainschema.Interface{*buildExpected(socketDir)}))
 			},
 			Entry("vhostuser binding plugin",
 				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				newExpectedInterface("net1", nil, nil, nil, 1),
+				func(socketDir string) *domainschema.Interface {
+					return newExpectedInterface(socketDir, "net1", nil, nil, nil, 1)
+				},
 			),
 			Entry("PCI address",
 				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					PciAddress: "0000:02:02.0"},
-				newExpectedInterface("net1",
-					&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x02", Slot: "0x02", Function: "0x0"},
-					nil, nil, 1),
+				func(socketDir string) *domainschema.Interface {
+					return newExpectedInterface(socketDir, "net1",
+						&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x02", Slot: "0x02", Function: "0x0"},
+						nil, nil, 1)
+				},
 			),
 			Entry("MAC address",
 				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					MacAddress: "02:02:02:02:02:02"},
-				newExpectedInterface("net1", nil,
-					&domainschema.MAC{MAC: "02:02:02:02:02:02"}, nil, 1),
+				func(socketDir string) *domainschema.Interface {
+					return newExpectedInterface(socketDir, "net1", nil,
+						&domainschema.MAC{MAC: "02:02:02:02:02:02"}, nil, 1)
+				},
 			),
 			Entry("ACPI address",
 				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					ACPIIndex: 2},
-				newExpectedInterface("net1", nil, nil,
-					&domainschema.ACPI{Index: uint(2)}, 1),
+				func(socketDir string) *domainschema.Interface {
+					return newExpectedInterface(socketDir, "net1", nil, nil,
+						&domainschema.ACPI{Index: uint(2)}, 1)
+				},
 			),
 		)
 
@@ -193,9 +227,10 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "net2", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}},
 			}
 
-			expectedDomainIface := newExpectedInterface("net1", nil, nil, nil, 1)
+			opts, socketDir := testOpts(1, "net1")
+			expectedDomainIface := newExpectedInterface(socketDir, "net1", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{Alias: domainschema.NewUserDefinedAlias("existing-iface")}
@@ -212,9 +247,10 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			expectedDomainIface := newExpectedInterface("net1", nil, nil, nil, 1)
+			opts, socketDir := testOpts(1, "net1")
+			expectedDomainIface := newExpectedInterface(socketDir, "net1", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -230,7 +266,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -246,7 +283,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -278,15 +316,16 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "net3", Binding: &vmschema.PluginBinding{Name: "vhostuser"}, MacAddress: "02:00:00:00:00:02", PciAddress: "0000:03:00.0"},
 			}
 
+			opts, socketDir := testOpts(1, "net1", "net2", "net3")
 			expectedDomainIfaces := []domainschema.Interface{
-				*newExpectedInterface("net1", nil, nil, nil, 1),
-				*newExpectedInterface("net2", nil, &domainschema.MAC{MAC: "02:00:00:00:00:01"}, nil, 1),
-				*newExpectedInterface("net3",
+				*newExpectedInterface(socketDir, "net1", nil, nil, nil, 1),
+				*newExpectedInterface(socketDir, "net2", nil, &domainschema.MAC{MAC: "02:00:00:00:00:01"}, nil, 1),
+				*newExpectedInterface(socketDir, "net3",
 					&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x03", Slot: "0x00", Function: "0x0"},
 					&domainschema.MAC{MAC: "02:00:00:00:00:02"}, nil, 1),
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1", "net2", "net3"))
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -302,7 +341,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, socketDir := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{
@@ -315,7 +355,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				},
 			}
 
-			expectedDomainIface := newExpectedInterface("net1", nil, nil, nil, 1)
+			expectedDomainIface := newExpectedInterface(socketDir, "net1", nil, nil, nil, 1)
 
 			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
 			Expect(err).ToNot(HaveOccurred())
@@ -327,7 +367,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -355,7 +396,8 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "net3", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1", "net3"))
+			opts, _ := testOpts(1, "net1", "net3")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			existingBridgeIface := &domainschema.Interface{
@@ -390,7 +432,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -411,7 +454,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(4, "net1"))
+			opts, _ := testOpts(4, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -432,7 +476,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -451,7 +496,8 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -480,7 +526,8 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(8, "net1", "net2"))
+			opts, _ := testOpts(8, "net1", "net2")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -502,7 +549,7 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			opts := testOpts(1, "net1")
+			opts, _ := testOpts(1, "net1")
 			opts.UseVirtioTransitional = false
 			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
@@ -518,9 +565,9 @@ var _ = Describe("vhostuser network configurator", func() {
 			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			expectedDomainIface := newExpectedInterfaceWithModel("net1", nil, nil, nil, 1, "virtio-transitional")
+			opts, socketDir := testOpts(1, "net1")
+			expectedDomainIface := newExpectedInterfaceWithModel(socketDir, "net1", nil, nil, nil, 1, "virtio-transitional")
 
-			opts := testOpts(1, "net1")
 			opts.UseVirtioTransitional = true
 			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
@@ -542,7 +589,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			opts := testOpts(1, "net1", "net2")
+			opts, _ := testOpts(1, "net1", "net2")
 			opts.UseVirtioTransitional = true
 			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
@@ -571,6 +618,7 @@ var _ = Describe("vhostuser network configurator", func() {
 
 			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
 			opts.SetNetInfoOverride(netInfoPath)
+			opts.SetSocketDirOverride(filepath.Join(GinkgoT().TempDir(), "vhost-binding"))
 			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -596,6 +644,7 @@ var _ = Describe("vhostuser network configurator", func() {
 
 			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
 			opts.SetNetInfoOverride(netInfoPath)
+			opts.SetSocketDirOverride(filepath.Join(GinkgoT().TempDir(), "vhost-binding"))
 			_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("wrong vhost-user mode"))
@@ -610,12 +659,100 @@ var _ = Describe("vhostuser network configurator", func() {
 
 			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
 			opts.SetNetInfoOverride(netInfoPath)
+			opts.SetSocketDirOverride(filepath.Join(GinkgoT().TempDir(), "vhost-binding"))
 			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("not found"))
+		})
+	})
+
+	Context("socket symlink management", func() {
+		It("should create symlink pointing to original socket directory", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			opts, socketDir := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+
+			// The symlink should exist and point into the original socket tree
+			symlinkPath := filepath.Join(socketDir, "net1")
+			target, err := os.Readlink(symlinkPath)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(target).To(HavePrefix("/var/run/vhost-user/"))
+		})
+
+		It("should replace existing symlink on repeated calls", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			opts, socketDir := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+
+			// Mutate again — should succeed, replacing the existing symlink
+			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+
+			symlinkPath := filepath.Join(socketDir, "net1")
+			target, err := os.Readlink(symlinkPath)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(target).To(HavePrefix("/var/run/vhost-user/"))
+		})
+
+		It("should produce stable paths regardless of original socket directory", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			// Use a device-plugin-style path with a deployment-specific UUID
+			socketDir := filepath.Join(GinkgoT().TempDir(), "vhost-binding")
+			netInfoPath := writeNetInfoFileRaw(downwardapi.Interface{
+				Network: "net1",
+				DeviceInfo: &networkv1.DeviceInfo{
+					Type:    networkv1.DeviceInfoTypeVHostUser,
+					Version: networkv1.DeviceInfoVersion,
+					VhostUser: &networkv1.VhostDevice{
+						Mode: networkv1.VhostDeviceModeClient,
+						Path: "/var/lib/kubelet/plugins/some-dp/deployment-abc123/vhost.sock",
+					},
+				},
+			})
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetNetInfoOverride(netInfoPath)
+			opts.SetSocketDirOverride(socketDir)
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+
+			// The domain XML path should use the stable symlink directory, not the original
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Source.Path).To(Equal(
+				filepath.Join(socketDir, "net1", "vhost.sock"),
+			))
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Source.Path).ToNot(ContainSubstring("deployment-abc123"))
 		})
 	})
 })
