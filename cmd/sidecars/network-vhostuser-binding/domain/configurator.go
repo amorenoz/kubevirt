@@ -20,28 +20,39 @@
 package domain
 
 import (
-	"crypto/sha256"
+	"encoding/json"
 	"fmt"
-	"io"
+	"os"
 	"path"
+	"time"
+
+	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	vmschema "kubevirt.io/api/core/v1"
-
-	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
-
 	"kubevirt.io/client-go/log"
-
+	"kubevirt.io/kubevirt/pkg/network/downwardapi"
+	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 )
 
 type VhostUserNetworkConfigurator struct {
 	vhostIfaces []*vmschema.Interface
 	opts        VhostUserConfiguratorOptions
+	socketPaths map[string]string
 }
 
 type VhostUserConfiguratorOptions struct {
 	Queues                uint
 	UseVirtioTransitional bool
+	// netInfoOverride, when set, overrides the default downward API network-info
+	// file path. Intended for testing only.
+	netInfoOverride string
+}
+
+// SetNetInfoOverride overrides the default downward API network-info file path.
+// This is intended for testing; production code should leave it unset.
+func (o *VhostUserConfiguratorOptions) SetNetInfoOverride(path string) {
+	o.netInfoOverride = path
 }
 
 const (
@@ -49,10 +60,8 @@ const (
 	VhostUserPluginName = "vhostuser"
 	// VhostUserLogFilePath vhost-user log file path Kubevirt consume and record
 	VhostUserLogFilePath = "/var/run/kubevirt/vhost-user.log"
-	// VhostUserLogFilePath path where vhost user sockets will be placed
-	// HACK! we should really find a way to get a host mount properly specified
-	VhostUserSockPath        = "/var/lib/vhost_sockets"
-	QueueSize         uint32 = 1024
+	// QueueSize is the TX/RX queue size for vhost-user interfaces.
+	QueueSize uint32 = 1024
 )
 
 func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, opts VhostUserConfiguratorOptions) (*VhostUserNetworkConfigurator, error) {
@@ -68,9 +77,21 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 		return nil, fmt.Errorf("no vhost interfaces found")
 	}
 
+	netInfoPath := path.Join(downwardapi.MountPath, downwardapi.NetworkInfoVolumePath)
+	if opts.netInfoOverride != "" {
+		log.Log.Infof("overriding netInfoPath %s", opts.netInfoOverride)
+		netInfoPath = opts.netInfoOverride
+	}
+
+	socketPaths, err := readSocketPaths(netInfoPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read network info: %w", err)
+	}
+
 	return &VhostUserNetworkConfigurator{
 		vhostIfaces: vhostIfaces,
 		opts:        opts,
+		socketPaths: socketPaths,
 	}, nil
 }
 
@@ -116,12 +137,12 @@ func (p VhostUserNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec
 	return domainSpecCopy, nil
 }
 
-func (p VhostUserNetworkConfigurator) getVhostUserPath(iface *vmschema.Interface) string {
-	// FIXME. Kubevirt generates this as interface name!
-	hash := sha256.New()
-	_, _ = io.WriteString(hash, iface.Name)
-	hashedName := fmt.Sprintf("%x", hash.Sum(nil))[:11]
-	return path.Join(VhostUserSockPath, fmt.Sprintf("%s%s", "pod", hashedName))
+func (p VhostUserNetworkConfigurator) getVhostUserPath(iface *vmschema.Interface) (string, error) {
+	sockPath, ok := p.socketPaths[iface.Name]
+	if !ok {
+		return "", fmt.Errorf("vhost user path for interface %s not found", iface.Name)
+	}
+	return sockPath, nil
 }
 
 func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.Interface) (*domainschema.Interface, error) {
@@ -152,7 +173,10 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 		acpi = &domainschema.ACPI{Index: uint(iface.ACPIIndex)}
 	}
 
-	vhostUserPath := p.getVhostUserPath(iface)
+	vhostUserPath, err := p.getVhostUserPath(iface)
+	if err != nil {
+		return nil, err
+	}
 	queueSize := uint(QueueSize)
 
 	return &domainschema.Interface{
@@ -175,4 +199,64 @@ func lookupIfaceByAliasName(ifaces []domainschema.Interface, name string) *domai
 	}
 
 	return nil
+}
+
+func readFileWithTimeout(path string, timeout uint32) ([]byte, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	timeoutChan := time.After(time.Duration(timeout) * time.Second)
+
+	// Try reading immediately first
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return data, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	for {
+		select {
+		case <-timeoutChan:
+			return nil, fmt.Errorf("timeout reading file %s after %d seconds", path, timeout)
+		case <-ticker.C:
+			data, err := os.ReadFile(path)
+			if err == nil {
+				return data, nil
+			}
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+		}
+	}
+}
+
+func readSocketPaths(netInfoPath string) (map[string]string, error) {
+	data, err := readFileWithTimeout(netInfoPath, 5)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read network info file: %w", err)
+	}
+
+	var networkInfo downwardapi.NetworkInfo
+	if err := json.Unmarshal(data, &networkInfo); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal NetworkInfo: %w", err)
+	}
+
+	result := make(map[string]string, len(networkInfo.Interfaces))
+	for _, iface := range networkInfo.Interfaces {
+		if iface.DeviceInfo == nil || iface.DeviceInfo.Type != networkv1.DeviceInfoTypeVHostUser {
+			continue
+		}
+		if iface.DeviceInfo.VhostUser == nil || iface.DeviceInfo.VhostUser.Mode != networkv1.VhostDeviceModeClient {
+			return nil, fmt.Errorf("deviceInfo for interface %s has wrong vhost-user mode (expected %s)",
+				iface.Network, networkv1.VhostDeviceModeClient)
+		}
+		if iface.DeviceInfo.VhostUser.Path == "" {
+			return nil, fmt.Errorf("deviceInfo for interface %s has empty vhost-user socket path",
+				iface.Network)
+		}
+		result[iface.Network] = iface.DeviceInfo.VhostUser.Path
+	}
+	return result, nil
 }

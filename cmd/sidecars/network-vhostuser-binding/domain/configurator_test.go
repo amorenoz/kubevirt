@@ -20,26 +20,72 @@
 package domain_test
 
 import (
-	"crypto/sha256"
+	"encoding/json"
 	"fmt"
-	"io"
-	"path"
+	"os"
+	"path/filepath"
+
+	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	vmschema "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/kubevirt/cmd/sidecars/network-vhostuser-binding/domain"
+	"kubevirt.io/kubevirt/pkg/network/downwardapi"
 
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
-// Helper function to compute vhost-user socket path
-func getVhostUserPath(ifaceName string) string {
-	hash := sha256.New()
-	_, _ = io.WriteString(hash, ifaceName)
-	hashedName := fmt.Sprintf("%x", hash.Sum(nil))[:11]
-	return path.Join(domain.VhostUserSockPath, fmt.Sprintf("%s%s", "pod", hashedName))
+// vhostUserSocketPath returns a fake socket path for a given interface name, for use in tests.
+func vhostUserSocketPath(ifaceName string) string {
+	return fmt.Sprintf("/var/run/vhost-user/%s.sock", ifaceName)
+}
+
+func multusNetwork(name string) vmschema.Network {
+	return vmschema.Network{
+		Name:          name,
+		NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: name}},
+	}
+}
+
+// writeNetInfoFile writes a downward API network-info file with valid vhost-user entries
+// for each named secondary network. The default pod network is not included, matching
+// production behavior (only interfaces with DeviceInfo appear in the file).
+func writeNetInfoFile(secondaryIfaceNames ...string) string {
+	var ifaces []downwardapi.Interface
+	for _, name := range secondaryIfaceNames {
+		ifaces = append(ifaces, downwardapi.Interface{
+			Network: name,
+			DeviceInfo: &networkv1.DeviceInfo{
+				Type:    networkv1.DeviceInfoTypeVHostUser,
+				Version: networkv1.DeviceInfoVersion,
+				VhostUser: &networkv1.VhostDevice{
+					Mode: networkv1.VhostDeviceModeClient,
+					Path: vhostUserSocketPath(name),
+				},
+			},
+		})
+	}
+	return writeNetInfoFileRaw(ifaces...)
+}
+
+// writeNetInfoFileRaw writes a network-info JSON file from the given interfaces and
+// returns the file path.
+func writeNetInfoFileRaw(ifaces ...downwardapi.Interface) string {
+	data, err := json.Marshal(downwardapi.NetworkInfo{Interfaces: ifaces})
+	ExpectWithOffset(1, err).ToNot(HaveOccurred())
+	f := filepath.Join(GinkgoT().TempDir(), "network-info")
+	ExpectWithOffset(1, os.WriteFile(f, data, 0644)).To(Succeed())
+	return f
+}
+
+// testOpts builds VhostUserConfiguratorOptions with the netinfo override pointed at a
+// temp file containing valid vhost-user entries for the given interface names.
+func testOpts(queues uint, ifaceNames ...string) domain.VhostUserConfiguratorOptions {
+	opts := domain.VhostUserConfiguratorOptions{Queues: queues}
+	opts.SetNetInfoOverride(writeNetInfoFile(ifaceNames...))
+	return opts
 }
 
 // Helper function to create expected interface with common defaults
@@ -53,7 +99,7 @@ func newExpectedInterfaceWithModel(name string, address *domainschema.Address, m
 	return &domainschema.Interface{
 		Alias:   domainschema.NewUserDefinedAlias(name),
 		Type:    "vhostuser",
-		Source:  domainschema.InterfaceSource{Type: "unix", Path: getVhostUserPath(name), Mode: "server"},
+		Source:  domainschema.InterfaceSource{Type: "unix", Path: vhostUserSocketPath(name), Mode: "server"},
 		Model:   &domainschema.Model{Type: modelType},
 		Address: address,
 		MAC:     mac,
@@ -66,30 +112,32 @@ var _ = Describe("vhostuser network configurator", func() {
 	Context("generate domain spec interface", func() {
 		DescribeTable("should fail to create configurator given",
 			func(ifaces []vmschema.Interface, networks []vmschema.Network) {
-				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+				_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 
 				Expect(err).To(HaveOccurred())
 			},
 			Entry("no interfaces",
-				nil,
-				[]vmschema.Network{{Name: "default", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{}}}},
+				[]vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface()},
+				[]vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")},
 			),
 			Entry("interface with no vhostuser binding method",
-				[]vmschema.Interface{{Name: "default", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}}},
-				[]vmschema.Network{*vmschema.DefaultPodNetwork()},
+				[]vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}}},
+				[]vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")},
 			),
 			Entry("interface with no vhostuser binding plugin",
-				[]vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "no-vhostuser"}}},
-				[]vmschema.Network{*vmschema.DefaultPodNetwork()},
+				[]vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "no-vhostuser"}}},
+				[]vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")},
 			),
 		)
 
 		It("should fail given interface with invalid PCI address", func() {
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
-				PciAddress: "invalid-pci-address"}}
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}, PciAddress: "invalid-pci-address"},
+			}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
@@ -98,10 +146,10 @@ var _ = Describe("vhostuser network configurator", func() {
 
 		DescribeTable("should add interface to domain spec given iface with",
 			func(iface *vmschema.Interface, expectedDomainIface *domainschema.Interface) {
-				ifaces := []vmschema.Interface{*iface}
-				networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
+				ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), *iface}
+				networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork(iface.Name)}
 
-				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+				testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, iface.Name))
 				Expect(err).ToNot(HaveOccurred())
 
 				mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -109,26 +157,26 @@ var _ = Describe("vhostuser network configurator", func() {
 				Expect(mutatedDomSpec.Devices.Interfaces).To(Equal([]domainschema.Interface{*expectedDomainIface}))
 			},
 			Entry("vhostuser binding plugin",
-				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				newExpectedInterface("default", nil, nil, nil, 1),
+				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				newExpectedInterface("net1", nil, nil, nil, 1),
 			),
 			Entry("PCI address",
-				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
+				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					PciAddress: "0000:02:02.0"},
-				newExpectedInterface("default",
+				newExpectedInterface("net1",
 					&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x02", Slot: "0x02", Function: "0x0"},
 					nil, nil, 1),
 			),
 			Entry("MAC address",
-				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
+				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					MacAddress: "02:02:02:02:02:02"},
-				newExpectedInterface("default", nil,
+				newExpectedInterface("net1", nil,
 					&domainschema.MAC{MAC: "02:02:02:02:02:02"}, nil, 1),
 			),
 			Entry("ACPI address",
-				&vmschema.Interface{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
+				&vmschema.Interface{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"},
 					ACPIIndex: 2},
-				newExpectedInterface("default", nil, nil,
+				newExpectedInterface("net1", nil, nil,
 					&domainschema.ACPI{Index: uint(2)}, 1),
 			),
 		)
@@ -136,16 +184,18 @@ var _ = Describe("vhostuser network configurator", func() {
 		It("should not override other interfaces", func() {
 			networks := []vmschema.Network{
 				*vmschema.DefaultPodNetwork(),
-				{Name: "secondary", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "sec"}}},
+				multusNetwork("net1"),
+				multusNetwork("net2"),
 			}
 			ifaces := []vmschema.Interface{
-				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				{Name: "secondary", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}},
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "net2", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}},
 			}
 
-			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
+			expectedDomainIface := newExpectedInterface("net1", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{Alias: domainschema.NewUserDefinedAlias("existing-iface")}
@@ -159,12 +209,12 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set domain interface correctly when executed more than once", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
+			expectedDomainIface := newExpectedInterface("net1", nil, nil, nil, 1)
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -177,10 +227,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set memory backing to shared", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -193,10 +243,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set memory backing to shared even if it exists with different mode", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -217,24 +267,26 @@ var _ = Describe("vhostuser network configurator", func() {
 		It("should handle multiple vhostuser interfaces correctly", func() {
 			networks := []vmschema.Network{
 				*vmschema.DefaultPodNetwork(),
-				{Name: "network1", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "net1"}}},
-				{Name: "network2", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "net2"}}},
+				multusNetwork("net1"),
+				multusNetwork("net2"),
+				multusNetwork("net3"),
 			}
 			ifaces := []vmschema.Interface{
-				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}, MacAddress: "02:00:00:00:00:01"},
-				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}, MacAddress: "02:00:00:00:00:02", PciAddress: "0000:03:00.0"},
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}, MacAddress: "02:00:00:00:00:01"},
+				{Name: "net3", Binding: &vmschema.PluginBinding{Name: "vhostuser"}, MacAddress: "02:00:00:00:00:02", PciAddress: "0000:03:00.0"},
 			}
 
 			expectedDomainIfaces := []domainschema.Interface{
-				*newExpectedInterface("default", nil, nil, nil, 1),
-				*newExpectedInterface("net1", nil, &domainschema.MAC{MAC: "02:00:00:00:00:01"}, nil, 1),
-				*newExpectedInterface("net2",
+				*newExpectedInterface("net1", nil, nil, nil, 1),
+				*newExpectedInterface("net2", nil, &domainschema.MAC{MAC: "02:00:00:00:00:01"}, nil, 1),
+				*newExpectedInterface("net3",
 					&domainschema.Address{Type: "pci", Domain: "0x0000", Bus: "0x03", Slot: "0x00", Function: "0x0"},
 					&domainschema.MAC{MAC: "02:00:00:00:00:02"}, nil, 1),
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1", "net2", "net3"))
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -247,14 +299,14 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should replace existing interface with same name", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			existingIface := &domainschema.Interface{
-				Alias: domainschema.NewUserDefinedAlias("default"),
+				Alias: domainschema.NewUserDefinedAlias("net1"),
 				Type:  "bridge",
 			}
 			testDomSpec := &domainschema.DomainSpec{
@@ -263,7 +315,7 @@ var _ = Describe("vhostuser network configurator", func() {
 				},
 			}
 
-			expectedDomainIface := newExpectedInterface("default", nil, nil, nil, 1)
+			expectedDomainIface := newExpectedInterface("net1", nil, nil, nil, 1)
 
 			mutatedDomSpec, err := testMutator.Mutate(testDomSpec)
 			Expect(err).ToNot(HaveOccurred())
@@ -272,10 +324,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set memory backing access when backing exists but access is nil", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -292,20 +344,22 @@ var _ = Describe("vhostuser network configurator", func() {
 		It("should handle mixed vhostuser and non-vhostuser interfaces", func() {
 			networks := []vmschema.Network{
 				*vmschema.DefaultPodNetwork(),
-				{Name: "multus1", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "net1"}}},
-				{Name: "multus2", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "net2"}}},
+				multusNetwork("net1"),
+				multusNetwork("net2"),
+				multusNetwork("net3"),
 			}
 			ifaces := []vmschema.Interface{
-				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				{Name: "multus1", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}},
-				{Name: "multus2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "net2", InterfaceBindingMethod: vmschema.InterfaceBindingMethod{Bridge: &vmschema.InterfaceBridge{}}},
+				{Name: "net3", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1", "net3"))
 			Expect(err).ToNot(HaveOccurred())
 
 			existingBridgeIface := &domainschema.Interface{
-				Alias: domainschema.NewUserDefinedAlias("multus1"),
+				Alias: domainschema.NewUserDefinedAlias("net2"),
 				Type:  "bridge",
 			}
 			testDomSpec := &domainschema.DomainSpec{
@@ -320,7 +374,7 @@ var _ = Describe("vhostuser network configurator", func() {
 
 			// Bridge interface should remain untouched
 			Expect(mutatedDomSpec.Devices.Interfaces[0].Type).To(Equal("bridge"))
-			Expect(mutatedDomSpec.Devices.Interfaces[0].Alias.GetName()).To(Equal("multus1"))
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Alias.GetName()).To(Equal("net2"))
 
 			// Vhostuser interfaces should be added
 			vhostuserIfaces := 0
@@ -333,10 +387,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set queues to 1 when multiqueue is disabled", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -354,10 +408,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set queues to number of vCPUs when multiqueue is enabled", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 4})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(4, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -375,10 +429,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set queues to 1 when multiqueue is enabled but VCPU is nil", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -394,10 +448,10 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set queue sizes to 1024", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 1})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(1, "net1"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{}
@@ -417,14 +471,16 @@ var _ = Describe("vhostuser network configurator", func() {
 		It("should handle multiqueue with multiple interfaces", func() {
 			networks := []vmschema.Network{
 				*vmschema.DefaultPodNetwork(),
-				{Name: "secondary", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "sec"}}},
+				multusNetwork("net1"),
+				multusNetwork("net2"),
 			}
 			ifaces := []vmschema.Interface{
-				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				{Name: "secondary", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{Queues: 8})
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, testOpts(8, "net1", "net2"))
 			Expect(err).ToNot(HaveOccurred())
 
 			testDomSpec := &domainschema.DomainSpec{
@@ -443,13 +499,12 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set model to virtio when UseVirtioTransitional is false", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{
-				Queues:                1,
-				UseVirtioTransitional: false,
-			})
+			opts := testOpts(1, "net1")
+			opts.UseVirtioTransitional = false
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -460,15 +515,14 @@ var _ = Describe("vhostuser network configurator", func() {
 		})
 
 		It("should set model to virtio-transitional when UseVirtioTransitional is true", func() {
-			networks := []vmschema.Network{*vmschema.DefaultPodNetwork()}
-			ifaces := []vmschema.Interface{{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
 
-			expectedDomainIface := newExpectedInterfaceWithModel("default", nil, nil, nil, 1, "virtio-transitional")
+			expectedDomainIface := newExpectedInterfaceWithModel("net1", nil, nil, nil, 1, "virtio-transitional")
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{
-				Queues:                1,
-				UseVirtioTransitional: true,
-			})
+			opts := testOpts(1, "net1")
+			opts.UseVirtioTransitional = true
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -479,17 +533,18 @@ var _ = Describe("vhostuser network configurator", func() {
 		It("should apply UseVirtioTransitional to all vhostuser interfaces", func() {
 			networks := []vmschema.Network{
 				*vmschema.DefaultPodNetwork(),
-				{Name: "secondary", NetworkSource: vmschema.NetworkSource{Multus: &vmschema.MultusNetwork{NetworkName: "sec"}}},
+				multusNetwork("net1"),
+				multusNetwork("net2"),
 			}
 			ifaces := []vmschema.Interface{
-				{Name: "default", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
-				{Name: "secondary", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
 			}
 
-			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, domain.VhostUserConfiguratorOptions{
-				Queues:                1,
-				UseVirtioTransitional: true,
-			})
+			opts := testOpts(1, "net1", "net2")
+			opts.UseVirtioTransitional = true
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
@@ -500,6 +555,67 @@ var _ = Describe("vhostuser network configurator", func() {
 				Expect(iface.Model).ToNot(BeNil())
 				Expect(iface.Model.Type).To(Equal("virtio-transitional"))
 			}
+		})
+
+		It("should fail when deviceInfo has non-vhostuser type for a vhostuser interface", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			netInfoPath := writeNetInfoFileRaw(downwardapi.Interface{
+				Network: "net1",
+				DeviceInfo: &networkv1.DeviceInfo{
+					Type: networkv1.DeviceInfoTypePCI,
+					Pci:  &networkv1.PciDevice{PciAddress: "0000:01:00.0"},
+				},
+			})
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetNetInfoOverride(netInfoPath)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not found"))
+		})
+
+		It("should fail when deviceInfo has wrong vhost-user mode", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			netInfoPath := writeNetInfoFileRaw(downwardapi.Interface{
+				Network: "net1",
+				DeviceInfo: &networkv1.DeviceInfo{
+					Type: networkv1.DeviceInfoTypeVHostUser,
+					VhostUser: &networkv1.VhostDevice{
+						Mode: networkv1.VhostDeviceModeServer,
+						Path: "/some/path.sock",
+					},
+				},
+			})
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetNetInfoOverride(netInfoPath)
+			_, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("wrong vhost-user mode"))
+		})
+
+		It("should fail when deviceInfo is missing for interface", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			// Write a net-info file with no interfaces
+			netInfoPath := writeNetInfoFileRaw()
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetNetInfoOverride(netInfoPath)
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not found"))
 		})
 	})
 })

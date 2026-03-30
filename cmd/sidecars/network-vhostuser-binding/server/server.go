@@ -55,7 +55,17 @@ func (s InfoServer) Info(_ context.Context, _ *hooksInfo.InfoParams) (*hooksInfo
 	}, nil
 }
 
-type V1alpha2Server struct{}
+type V1alpha2Server struct {
+	// netInfoOverride, when set, overrides the default downward API network-info
+	// file path. Intended for testing only.
+	netInfoOverride string
+}
+
+// SetNetInfoOverride overrides the default downward API network-info file path.
+// This is intended for testing.
+func (s *V1alpha2Server) SetNetInfoOverride(path string) {
+	s.netInfoOverride = path
+}
 
 func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.OnDefineDomainParams) (*hooksV1alpha2.OnDefineDomainResult, error) {
 	vmi := &vmschema.VirtualMachineInstance{}
@@ -66,17 +76,6 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 	log.Log.Infof("vhostuser OnDefineDomain")
 	log.Log.Infof("VMI: %#v\n", vmi)
 	log.Log.Infof("annotations: %#v\n", vmi.GetAnnotations())
-
-	pods := vmi.Status.ActivePods
-	podID := ""
-	for id, _ := range pods {
-		// No live migration for now, take the fist one
-		podID = string(id)
-		break
-	}
-	if podID == "" {
-		return nil, fmt.Errorf("failed to find pod ID")
-	}
 
 	queues := uint(1)
 	if mq := vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue; mq != nil && *mq {
@@ -94,6 +93,9 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 	opts := domain.VhostUserConfiguratorOptions{
 		Queues:                queues,
 		UseVirtioTransitional: useVirtioTransitional,
+	}
+	if len(s.netInfoOverride) > 0 {
+		opts.SetNetInfoOverride(s.netInfoOverride)
 	}
 
 	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, opts)
