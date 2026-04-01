@@ -70,7 +70,7 @@ const (
 	// VhostUserLogFilePath vhost-user log file path Kubevirt consume and record
 	VhostUserLogFilePath = "/var/run/kubevirt/vhost-user.log"
 	// Directory where the binding will symlink sockets.
-	VhostUserSocketDir = "/var/run/vhost-binding/"
+	VhostUserSocketDir = "/var/run/kubevirt-hooks/"
 	// QueueSize is the TX/RX queue size for vhost-user interfaces.
 	QueueSize uint32 = 1024
 )
@@ -180,6 +180,13 @@ func (p VhostUserNetworkConfigurator) getVhostUserPath(iface *vmschema.Interface
 	if err := os.Symlink(sockDir, symlinkPath); err != nil {
 		return "", fmt.Errorf("failed to create symlink for socket: %w", err)
 	}
+
+	// We get a volume's subpath based on the CONTAINER_NAME while the launcher container
+	// gets the full volume. Append CONTAINER_NAME to the path we tell libvirt to use.
+	if env := os.Getenv("CONTAINER_NAME"); env != "" {
+		symlinkPath = path.Join(socketDir, env, iface.Name)
+	}
+
 	return path.Join(symlinkPath, sockFile), nil
 }
 
