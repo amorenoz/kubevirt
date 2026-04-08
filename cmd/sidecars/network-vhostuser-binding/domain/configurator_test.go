@@ -667,6 +667,52 @@ var _ = Describe("vhostuser network configurator", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("not found"))
 		})
+
+		It("should set MTU on domain interface when network-info provides it", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			socketDir := filepath.Join(GinkgoT().TempDir(), "vhost-binding")
+			netInfoPath := writeNetInfoFileRaw(downwardapi.Interface{
+				Network: "net1",
+				Mtu:     9000,
+				DeviceInfo: &networkv1.DeviceInfo{
+					Type:    networkv1.DeviceInfoTypeVHostUser,
+					Version: networkv1.DeviceInfoVersion,
+					VhostUser: &networkv1.VhostDevice{
+						Mode: networkv1.VhostDeviceModeClient,
+						Path: inputSocketPath("net1"),
+					},
+				},
+			})
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetNetInfoOverride(netInfoPath)
+			opts.SetSocketDirOverride(socketDir)
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+			Expect(mutatedDomSpec.Devices.Interfaces[0].MTU).ToNot(BeNil())
+			Expect(mutatedDomSpec.Devices.Interfaces[0].MTU.Size).To(Equal("9000"))
+		})
+
+		It("should not set MTU on domain interface when network-info has no MTU", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{*vmschema.DefaultMasqueradeNetworkInterface(), {Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}}}
+
+			opts, _ := testOpts(1, "net1")
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+			Expect(mutatedDomSpec.Devices.Interfaces[0].MTU).To(BeNil())
+		})
 	})
 
 	Context("socket symlink management", func() {

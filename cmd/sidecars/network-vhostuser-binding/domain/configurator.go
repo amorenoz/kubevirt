@@ -24,21 +24,28 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"time"
 
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	vmschema "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
+
 	"kubevirt.io/kubevirt/pkg/network/downwardapi"
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 )
 
+type vhostNetworkData struct {
+	socketPath string
+	mtu        int
+}
+
 type VhostUserNetworkConfigurator struct {
 	vhostIfaces []*vmschema.Interface
 	opts        VhostUserConfiguratorOptions
-	socketPaths map[string]string
+	networkData map[string]vhostNetworkData // data extracted from Downward API
 }
 
 type VhostUserConfiguratorOptions struct {
@@ -94,7 +101,7 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 		netInfoPath = opts.netInfoOverride
 	}
 
-	socketPaths, err := readSocketPaths(netInfoPath)
+	networkData, err := readVhostNetworkData(netInfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read network info: %w", err)
 	}
@@ -102,7 +109,7 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 	return &VhostUserNetworkConfigurator{
 		vhostIfaces: vhostIfaces,
 		opts:        opts,
-		socketPaths: socketPaths,
+		networkData: networkData,
 	}, nil
 }
 
@@ -149,12 +156,12 @@ func (p VhostUserNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec
 }
 
 func (p VhostUserNetworkConfigurator) getVhostUserPath(iface *vmschema.Interface) (string, error) {
-	sockPath, ok := p.socketPaths[iface.Name]
+	data, ok := p.networkData[iface.Name]
 	if !ok {
 		return "", fmt.Errorf("vhost user path for interface %s not found", iface.Name)
 	}
-	sockFile := path.Base(sockPath)
-	sockDir := path.Dir(sockPath)
+	sockFile := path.Base(data.socketPath)
+	sockDir := path.Dir(data.socketPath)
 
 	// Vhost-user socket paths might contain deployment-specific strings if they come from a DevicePlugin.
 	// These bits would change when another pod is deployed for the same VM, i.e: during live-migration, leading
@@ -224,7 +231,12 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 	}
 	queueSize := uint(QueueSize)
 
-	return &domainschema.Interface{
+	var mtu *domainschema.MTU
+	if data, ok := p.networkData[iface.Name]; ok && data.mtu > 0 {
+		mtu = &domainschema.MTU{Size: strconv.Itoa(data.mtu)}
+	}
+
+	domIface := &domainschema.Interface{
 		Alias:   domainschema.NewUserDefinedAlias(iface.Name),
 		Model:   model,
 		Address: pciAddress,
@@ -233,7 +245,10 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 		Type:    "vhostuser",
 		Source:  domainschema.InterfaceSource{Type: "unix", Path: vhostUserPath, Mode: "server"},
 		Driver:  &domainschema.InterfaceDriver{TXQueueSize: &queueSize, RXQueueSize: &queueSize, Queues: &p.opts.Queues},
-	}, nil
+		MTU:     mtu,
+	}
+
+	return domIface, nil
 }
 
 func lookupIfaceByAliasName(ifaces []domainschema.Interface, name string) *domainschema.Interface {
@@ -277,7 +292,7 @@ func readFileWithTimeout(path string, timeout uint32) ([]byte, error) {
 	}
 }
 
-func readSocketPaths(netInfoPath string) (map[string]string, error) {
+func readVhostNetworkData(netInfoPath string) (map[string]vhostNetworkData, error) {
 	data, err := readFileWithTimeout(netInfoPath, 5)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read network info file: %w", err)
@@ -288,7 +303,7 @@ func readSocketPaths(netInfoPath string) (map[string]string, error) {
 		return nil, fmt.Errorf("failed to unmarshal NetworkInfo: %w", err)
 	}
 
-	result := make(map[string]string, len(networkInfo.Interfaces))
+	result := make(map[string]vhostNetworkData, len(networkInfo.Interfaces))
 	for _, iface := range networkInfo.Interfaces {
 		if iface.DeviceInfo == nil || iface.DeviceInfo.Type != networkv1.DeviceInfoTypeVHostUser {
 			continue
@@ -301,7 +316,10 @@ func readSocketPaths(netInfoPath string) (map[string]string, error) {
 			return nil, fmt.Errorf("deviceInfo for interface %s has empty vhost-user socket path",
 				iface.Network)
 		}
-		result[iface.Network] = iface.DeviceInfo.VhostUser.Path
+		result[iface.Network] = vhostNetworkData{
+			socketPath: iface.DeviceInfo.VhostUser.Path,
+			mtu:        iface.Mtu,
+		}
 	}
 	return result, nil
 }
