@@ -100,6 +100,52 @@ var _ = Describe("DeviceInfo", func() {
 		}
 		Expect(deviceinfo.MapNetworkNameToDeviceInfo(networks, interfaces, networkStatusWithMixedNetworks)).To(Equal(expectedMap))
 	})
+
+	It("should return MTU mapping from network statuses", func() {
+		networkStatusesWithMTU := []networkv1.NetworkStatus{
+			{
+				Name:      "kindnet",
+				Interface: "eth0",
+				Default:   true,
+				Mtu:       1500,
+			},
+			{
+				Name:      "default/nad1",
+				Interface: "pod6446d58d6df",
+				Mtu:       9000,
+			},
+			{
+				Name:      "default/nad2",
+				Interface: "pod2c26b46b68f",
+				DeviceInfo: &networkv1.DeviceInfo{
+					Type:    "pci",
+					Version: "1.0.0",
+					Pci:     &networkv1.PciDevice{PciAddress: "0000:65:00.2"},
+				},
+			},
+		}
+
+		networks := []v1.Network{
+			*v1.DefaultPodNetwork(),
+			*libvmi.MultusNetwork("boo", "default/nad1"),
+			*libvmi.MultusNetwork("foo", "default/nad2"),
+		}
+		interfaces := []v1.Interface{
+			newBindingPluginInterface("boo", deviceInfoPlugin),
+			newBindingPluginInterface("foo", deviceInfoPlugin),
+		}
+
+		mtuMap := deviceinfo.MapNetworkNameToMTU(networks, interfaces, networkStatusesWithMTU)
+		Expect(mtuMap).To(Equal(map[string]int{"boo": 9000}))
+	})
+
+	It("should return empty MTU map when no statuses have MTU", func() {
+		networks := []v1.Network{*libvmi.MultusNetwork("foo", "default/nad1")}
+		interfaces := []v1.Interface{newBindingPluginInterface("foo", deviceInfoPlugin)}
+
+		mtuMap := deviceinfo.MapNetworkNameToMTU(networks, interfaces, networkStatusWithMixedNetworks)
+		Expect(mtuMap).To(BeEmpty())
+	})
 })
 
 func newBindingPluginInterface(name, bindingPlugin string) v1.Interface {

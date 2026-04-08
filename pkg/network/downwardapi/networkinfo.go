@@ -36,8 +36,8 @@ const (
 	NetworkInfoVolumePath = "network-info"
 )
 
-func CreateNetworkInfoAnnotationValue(networkDeviceInfoMap map[string]*networkv1.DeviceInfo) string {
-	networkInfo := generateNetworkInfo(networkDeviceInfoMap)
+func CreateNetworkInfoAnnotationValue(networkDeviceInfoMap map[string]*networkv1.DeviceInfo, networkMTUMap map[string]int) string {
+	networkInfo := generateNetworkInfo(networkDeviceInfoMap, networkMTUMap)
 	networkInfoBytes, err := json.Marshal(networkInfo)
 	if err != nil {
 		log.Log.Warningf("failed to marshal network-info: %v", err)
@@ -47,14 +47,18 @@ func CreateNetworkInfoAnnotationValue(networkDeviceInfoMap map[string]*networkv1
 	return string(networkInfoBytes)
 }
 
-func generateNetworkInfo(networkDeviceInfoMap map[string]*networkv1.DeviceInfo) NetworkInfo {
+func generateNetworkInfo(networkDeviceInfoMap map[string]*networkv1.DeviceInfo, networkMTUMap map[string]int) NetworkInfo {
 	var downwardAPIInterfaces []Interface
 
 	// Sort keys of the map with to get deterministic order
 	sortedNetNames := slices.Sorted(maps.Keys(networkDeviceInfoMap))
 	for _, networkName := range sortedNetNames {
 		deviceInfo := networkDeviceInfoMap[networkName]
-		downwardAPIInterfaces = append(downwardAPIInterfaces, Interface{Network: networkName, DeviceInfo: deviceInfo})
+		iface := Interface{Network: networkName, DeviceInfo: deviceInfo}
+		if mtu, exists := networkMTUMap[networkName]; exists {
+			iface.Mtu = mtu
+		}
+		downwardAPIInterfaces = append(downwardAPIInterfaces, iface)
 	}
 	networkInfo := NetworkInfo{Interfaces: downwardAPIInterfaces}
 	return networkInfo

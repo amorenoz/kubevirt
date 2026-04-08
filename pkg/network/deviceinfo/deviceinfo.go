@@ -47,3 +47,21 @@ func MapNetworkNameToDeviceInfo(networks []v1.Network,
 	}
 	return networkDeviceInfo
 }
+
+func MapNetworkNameToMTU(networks []v1.Network,
+	interfaces []v1.Interface,
+	networkStatuses []networkv1.NetworkStatus,
+) map[string]int {
+	multusInterfaceNameToNetworkStatus := multus.NetworkStatusesByPodIfaceName(networkStatuses)
+	podIfaceNamesByNetworkName := namescheme.CreateFromNetworkStatuses(networks, networkStatuses)
+
+	networkMTU := map[string]int{}
+	for _, iface := range interfaces {
+		multusInterfaceName := podIfaceNamesByNetworkName[iface.Name]
+		networkStatusEntry, exist := multusInterfaceNameToNetworkStatus[multusInterfaceName]
+		if exist && networkStatusEntry.Mtu > 0 {
+			networkMTU[iface.Name] = networkStatusEntry.Mtu
+		}
+	}
+	return networkMTU
+}
