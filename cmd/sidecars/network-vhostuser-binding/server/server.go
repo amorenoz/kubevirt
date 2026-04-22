@@ -59,21 +59,12 @@ type V1alpha2Server struct {
 	// netInfoOverride, when set, overrides the default downward API network-info
 	// file path. Intended for testing only.
 	netInfoOverride string
-	// socketDirOverride, when set, overrides the default vhost-user socket
-	// symlink directory. Intended for testing only.
-	socketDirOverride string
 }
 
 // SetNetInfoOverride overrides the default downward API network-info file path.
 // This is intended for testing.
 func (s *V1alpha2Server) SetNetInfoOverride(path string) {
 	s.netInfoOverride = path
-}
-
-// SetSocketDirOverride overrides the default vhost-user socket symlink directory.
-// This is intended for testing.
-func (s *V1alpha2Server) SetSocketDirOverride(dir string) {
-	s.socketDirOverride = dir
 }
 
 func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.OnDefineDomainParams) (*hooksV1alpha2.OnDefineDomainResult, error) {
@@ -105,9 +96,6 @@ func (s V1alpha2Server) OnDefineDomain(_ context.Context, params *hooksV1alpha2.
 	}
 	if len(s.netInfoOverride) > 0 {
 		opts.SetNetInfoOverride(s.netInfoOverride)
-	}
-	if len(s.socketDirOverride) > 0 {
-		opts.SetSocketDirOverride(s.socketDirOverride)
 	}
 
 	vhostuserConfigurator, err := domain.NewVhostUserNetworkConfigurator(vmi.Spec.Domain.Devices.Interfaces, vmi.Spec.Networks, opts)
