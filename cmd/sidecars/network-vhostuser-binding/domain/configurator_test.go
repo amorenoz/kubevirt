@@ -32,7 +32,7 @@ import (
 	. "github.com/onsi/gomega"
 	vmschema "kubevirt.io/api/core/v1"
 
-	"kubevirt.io/kubevirt/cmd/sidecars/network-vhostuser-binding/domain"
+	"kubevirt.io/network-vhostuser-binding/domain"
 	"kubevirt.io/kubevirt/pkg/network/downwardapi"
 
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"

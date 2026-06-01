@@ -32,8 +32,8 @@ import (
 
 	"kubevirt.io/client-go/log"
 
-	"kubevirt.io/kubevirt/cmd/sidecars/network-vhostuser-binding/callback"
-	"kubevirt.io/kubevirt/cmd/sidecars/network-vhostuser-binding/domain"
+	"kubevirt.io/network-vhostuser-binding/callback"
+	"kubevirt.io/network-vhostuser-binding/domain"
 )
 
 type InfoServer struct {

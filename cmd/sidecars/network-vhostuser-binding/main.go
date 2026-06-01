@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	srv "kubevirt.io/kubevirt/cmd/sidecars/network-vhostuser-binding/server"
+	srv "kubevirt.io/network-vhostuser-binding/server"
 
 	"google.golang.org/grpc"
 
