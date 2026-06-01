@@ -33,8 +33,10 @@ import (
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/network/downwardapi"
+	"kubevirt.io/kubevirt/pkg/network/namescheme"
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
+	"kubevirt.io/network-vhostuser-binding/dra"
 )
 
 type vhostNetworkData struct {
@@ -57,6 +59,9 @@ type VhostUserConfiguratorOptions struct {
 	// socketDirOverride, when set, overrides VhostUserSocketDir.
 	// Intended for testing only.
 	socketDirOverride string
+	// draBaseDirOverride, when set, overrides the default DRA metadata
+	// directory [dra.ContainerDir]. Intended for testing only.
+	draBaseDirOverride string
 }
 
 // SetNetInfoOverride overrides the default downward API network-info file path.
@@ -69,6 +74,12 @@ func (o *VhostUserConfiguratorOptions) SetNetInfoOverride(path string) {
 // This is intended for testing.
 func (o *VhostUserConfiguratorOptions) SetSocketDirOverride(dir string) {
 	o.socketDirOverride = dir
+}
+
+// SetDRABaseDirOverride overrides the default DRA metadata directory.
+// This is intended for testing; production code should leave it unset.
+func (o *VhostUserConfiguratorOptions) SetDRABaseDirOverride(dir string) {
+	o.draBaseDirOverride = dir
 }
 
 const (
@@ -95,15 +106,9 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 		return nil, fmt.Errorf("no vhost interfaces found")
 	}
 
-	netInfoPath := path.Join(downwardapi.MountPath, downwardapi.NetworkInfoVolumePath)
-	if opts.netInfoOverride != "" {
-		log.Log.Infof("overriding netInfoPath %s", opts.netInfoOverride)
-		netInfoPath = opts.netInfoOverride
-	}
-
-	networkData, err := readVhostNetworkData(netInfoPath)
+	networkData, err := resolveNetworkData(vhostIfaces, networks, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read network info: %w", err)
+		return nil, err
 	}
 
 	return &VhostUserNetworkConfigurator{
@@ -111,6 +116,66 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 		opts:        opts,
 		networkData: networkData,
 	}, nil
+}
+
+// resolveNetworkData determines the socket path for each vhost-user interface.
+// It prefers DRA (KEP-5304) when a reader is available, falling back to the
+// downward API otherwise.
+func resolveNetworkData(vhostIfaces []*vmschema.Interface, networks []vmschema.Network, opts VhostUserConfiguratorOptions) (map[string]vhostNetworkData, error) {
+	baseDir := opts.draBaseDirOverride
+	if baseDir == "" {
+		baseDir = dra.ContainerDir
+	}
+
+	if _, err := os.Stat(baseDir); err == nil {
+		log.Log.Infof("DRA: metadata directory %q present, attempting DRA discovery", baseDir)
+		// Map VMI logical network names to their hashed pod interface names,
+		// which is what the DRA claim is named after.
+		podIfaceNames := namescheme.CreateHashedNetworkNameScheme(networks)
+		data, err := readDRANetworkData(vhostIfaces, podIfaceNames, dra.Reader{BaseDir: baseDir})
+		if err == nil {
+			log.Log.Infof("DRA: socket discovery succeeded for all interfaces")
+			return data, nil
+		}
+		log.Log.Warningf("DRA: socket discovery failed (%v), falling back to downward API", err)
+	} else {
+		log.Log.Infof("DRA: metadata directory %q absent (%v), using downward API", baseDir, err)
+	}
+
+	netInfoPath := path.Join(downwardapi.MountPath, downwardapi.NetworkInfoVolumePath)
+	if opts.netInfoOverride != "" {
+		log.Log.Infof("downward API: overriding netInfoPath with %q", opts.netInfoOverride)
+		netInfoPath = opts.netInfoOverride
+	}
+	data, err := readVhostNetworkData(netInfoPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read network info: %w", err)
+	}
+	return data, nil
+}
+
+// readDRANetworkData resolves the socket path for every vhost-user interface
+// via DRA metadata. Returns an error if any interface cannot be resolved so
+// that the caller can fall back to the downward API.
+// podIfaceNames maps VMI logical network name → hashed pod interface name,
+// which is the name the DRA claim is registered under.
+func readDRANetworkData(vhostIfaces []*vmschema.Interface, podIfaceNames map[string]string, reader dra.Reader) (map[string]vhostNetworkData, error) {
+	result := make(map[string]vhostNetworkData, len(vhostIfaces))
+	for _, iface := range vhostIfaces {
+		podIfaceName, ok := podIfaceNames[iface.Name]
+		if !ok {
+			return nil, fmt.Errorf("interface %q: no pod interface name found", iface.Name)
+		}
+		log.Log.Infof("DRA: interface=%q maps to pod interface name %q", iface.Name, podIfaceName)
+		meta, resourceNameUsed, err := dra.ResolveForInterface(reader, podIfaceName)
+		if err != nil {
+			return nil, fmt.Errorf("interface %q (pod iface %q): %w", iface.Name, podIfaceName, err)
+		}
+		log.Log.Infof("DRA: interface=%q resolved via requestName=%q socketPath=%q",
+			iface.Name, resourceNameUsed, meta.SocketPath)
+		result[iface.Name] = vhostNetworkData{socketPath: meta.SocketPath}
+	}
+	return result, nil
 }
 
 func (p VhostUserNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec) (*domainschema.DomainSpec, error) {
@@ -225,10 +290,12 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 		acpi = &domainschema.ACPI{Index: uint(iface.ACPIIndex)}
 	}
 
-	vhostUserPath, err := p.getVhostUserPath(iface)
-	if err != nil {
-		return nil, err
+	//vhostUserPath, err := p.getVhostUserPath(iface)
+	data, ok := p.networkData[iface.Name]
+	if !ok {
+		return nil, fmt.Errorf("No network data for interface %s", iface.Name)
 	}
+	vhostUserPath := data.socketPath
 	queueSize := uint(QueueSize)
 
 	var mtu *domainschema.MTU

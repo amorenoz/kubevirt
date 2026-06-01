@@ -34,6 +34,7 @@ import (
 
 	"kubevirt.io/network-vhostuser-binding/domain"
 	"kubevirt.io/kubevirt/pkg/network/downwardapi"
+	"kubevirt.io/kubevirt/pkg/network/namescheme"
 
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
@@ -799,6 +800,132 @@ var _ = Describe("vhostuser network configurator", func() {
 				filepath.Join(socketDir, "net1", "vhost.sock"),
 			))
 			Expect(mutatedDomSpec.Devices.Interfaces[0].Source.Path).ToNot(ContainSubstring("deployment-abc123"))
+		})
+	})
+
+	Context("DRA-based socket discovery", func() {
+		// writeDRAMetadataFile creates a minimal DRA metadata JSON file under
+		// <root>/resourceclaims/<ifaceName>/<requestName>/ and returns the root.
+		writeDRAMetadataFile := func(ifaceName, requestName, socketPath string) string {
+			root := GinkgoT().TempDir()
+			dir := filepath.Join(root, "resourceclaims", ifaceName, requestName)
+			Expect(os.MkdirAll(dir, 0755)).To(Succeed())
+			json := fmt.Sprintf(
+				`{"apiVersion":"metadata.resource.k8s.io/v1alpha1","kind":"DeviceMetadata",`+
+					`"metadata":{"name":"test-claim","namespace":"default"},`+
+					`"requests":[{"name":"vhost-user","devices":[{"driver":"vhost-user.example.com",`+
+					`"pool":"node-0","name":"vhu0","attributes":{"socketPath":{"string":%q}}}]}]}`,
+				socketPath,
+			)
+			Expect(os.WriteFile(
+				filepath.Join(dir, "vhost-user.example.com-metadata.json"),
+				[]byte(json), 0644,
+			)).To(Succeed())
+			return root
+		}
+
+		It("uses DRA socket path when DRABaseDirOverride is set", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			socketDir := GinkgoT().TempDir()
+			// DRA claim is named after the hashed pod interface name, not the VMI logical name.
+			podIfaceName := namescheme.GenerateHashedInterfaceName("net1")
+			draRoot := writeDRAMetadataFile(podIfaceName, "vhost-user", "/var/run/vhost-user/abc12/vhost.sock")
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetSocketDirOverride(socketDir)
+			opts.SetDRABaseDirOverride(draRoot)
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Source.Path).To(Equal(
+				filepath.Join(socketDir, "net1", "vhost.sock"),
+			))
+		})
+
+		It("falls back to downward API when DRA resolution fails", func() {
+			networks := []vmschema.Network{*vmschema.DefaultPodNetwork(), multusNetwork("net1")}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			socketDir := GinkgoT().TempDir()
+			// SetDRABaseDirOverride points at an empty dir — no metadata files present.
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetSocketDirOverride(socketDir)
+			opts.SetDRABaseDirOverride(GinkgoT().TempDir())
+			opts.SetNetInfoOverride(writeNetInfoFile("net1"))
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(1))
+			// Path comes from the downward API symlink, not DRA.
+			Expect(mutatedDomSpec.Devices.Interfaces[0].Source.Path).To(Equal(
+				filepath.Join(socketDir, "net1", "vhost.sock"),
+			))
+		})
+
+		It("resolves multiple interfaces via DRA", func() {
+			networks := []vmschema.Network{
+				*vmschema.DefaultPodNetwork(),
+				multusNetwork("net1"),
+				multusNetwork("net2"),
+			}
+			ifaces := []vmschema.Interface{
+				*vmschema.DefaultMasqueradeNetworkInterface(),
+				{Name: "net1", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+				{Name: "net2", Binding: &vmschema.PluginBinding{Name: "vhostuser"}},
+			}
+
+			socketDir := GinkgoT().TempDir()
+			draRoot := GinkgoT().TempDir()
+			for _, name := range []string{"net1", "net2"} {
+				// DRA claim is named after the hashed pod interface name.
+				podIfaceName := namescheme.GenerateHashedInterfaceName(name)
+				dir := filepath.Join(draRoot, "resourceclaimtemplates", podIfaceName, "vhost-user")
+				Expect(os.MkdirAll(dir, 0755)).To(Succeed())
+				sockPath := fmt.Sprintf("/var/run/vhost-user/%s/vhost.sock", name)
+				json := fmt.Sprintf(
+					`{"apiVersion":"metadata.resource.k8s.io/v1alpha1","kind":"DeviceMetadata",`+
+						`"metadata":{"name":"test-claim","namespace":"default"},`+
+						`"requests":[{"name":"vhost-user","devices":[{"driver":"vhost-user.example.com",`+
+						`"pool":"node-0","name":"vhu0","attributes":{"socketPath":{"string":%q}}}]}]}`,
+					sockPath,
+				)
+				Expect(os.WriteFile(
+					filepath.Join(dir, "vhost-user.example.com-metadata.json"),
+					[]byte(json), 0644,
+				)).To(Succeed())
+			}
+
+			opts := domain.VhostUserConfiguratorOptions{Queues: 1}
+			opts.SetSocketDirOverride(socketDir)
+			opts.SetDRABaseDirOverride(draRoot)
+
+			testMutator, err := domain.NewVhostUserNetworkConfigurator(ifaces, networks, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			mutatedDomSpec, err := testMutator.Mutate(&domainschema.DomainSpec{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(mutatedDomSpec.Devices.Interfaces).To(HaveLen(2))
+			for _, domIface := range mutatedDomSpec.Devices.Interfaces {
+				name := domIface.Alias.GetName()
+				Expect(domIface.Source.Path).To(Equal(
+					filepath.Join(socketDir, name, "vhost.sock"),
+				))
+			}
 		})
 	})
 })
