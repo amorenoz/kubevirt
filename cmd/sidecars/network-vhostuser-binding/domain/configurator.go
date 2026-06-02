@@ -217,6 +217,14 @@ func (p VhostUserNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec
 
 	domainSpecCopy.MemoryBacking.Access.Mode = "shared"
 
+	///DEBUG
+	//for {
+	//	if _, err := os.Stat("/tmp/continue"); err == nil {
+	//		break
+	//	}
+	//	time.Sleep(100 * time.Millisecond)
+	//}
+
 	return domainSpecCopy, nil
 }
 
