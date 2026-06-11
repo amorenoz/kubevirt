@@ -25,56 +25,39 @@ import (
 	"kubevirt.io/client-go/log"
 )
 
-// resourceNames is the ordered list of DRA request names to try when
-// resolving metadata for a vhost-user interface. The wildcard "*" is
-// attempted first; if it finds nothing we fall back to the hardcoded
-// "vhost-user" name.
-var resourceNames = []string{"*", "vhost-user"}
-
-// ResolveForInterface tries each resource name in [resourceNames] against
-// both a direct ResourceClaim and a ResourceClaimTemplate, logging the
-// outcome of every attempt so that callers can see at a glance whether "*"
-// worked or whether the fallback to "vhost-user" was necessary.
-//
-// The claimName / podClaimName passed to the reader must equal the interface
-// name (strict-validation requirement).
-//
-// On success it returns the resolved [SocketMetadata] and the resource name
-// that worked. On failure it returns an error that aggregates all individual
-// attempt errors.
-func ResolveForInterface(reader Reader, ifaceName string) (SocketMetadata, string, error) {
+// ResolveForInterface resolves the socket metadata for a single interface
+// using the explicit pod claim name and request name from the VMI annotation.
+// It tries both a direct ResourceClaim and a ResourceClaimTemplate, logging
+// the outcome of every attempt.
+func ResolveForInterface(reader Reader, ifaceName string, ref ResourceRef) (SocketMetadata, error) {
 	type attempt struct {
 		claimType string
-		readFn    func(resourceName string) (SocketMetadata, error)
+		readFn    func() (SocketMetadata, error)
 	}
 	attempts := []attempt{
-		{"ResourceClaim", func(rn string) (SocketMetadata, error) {
-			return reader.ReadClaim(ifaceName, rn)
+		{"ResourceClaim", func() (SocketMetadata, error) {
+			return reader.ReadClaim(ref.PodClaimName, ref.RequestName)
 		}},
-		{"ResourceClaimTemplate", func(rn string) (SocketMetadata, error) {
-			return reader.ReadClaimTemplate(ifaceName, rn)
+		{"ResourceClaimTemplate", func() (SocketMetadata, error) {
+			return reader.ReadClaimTemplate(ref.PodClaimName, ref.RequestName)
 		}},
 	}
 
-	var allErrs []error
-	for _, rn := range resourceNames {
-		for _, a := range attempts {
-			log.Log.Infof("DRA: interface=%q %s requestName=%q: attempting lookup",
-				ifaceName, a.claimType, rn)
+	for _, a := range attempts {
+		log.Log.Infof("DRA: interface=%q %s podClaimName=%q requestName=%q: attempting lookup",
+			ifaceName, a.claimType, ref.PodClaimName, ref.RequestName)
 
-			meta, err := a.readFn(rn)
-			if err == nil {
-				log.Log.Infof("DRA: interface=%q %s requestName=%q: SUCCESS socketPath=%q",
-					ifaceName, a.claimType, rn, meta.SocketPath)
-				return meta, rn, nil
-			}
-
-			log.Log.Warningf("DRA: interface=%q %s requestName=%q: FAILED: %v",
-				ifaceName, a.claimType, rn, err)
-			allErrs = append(allErrs, fmt.Errorf("%s requestName=%q: %w", a.claimType, rn, err))
+		meta, err := a.readFn()
+		if err == nil {
+			log.Log.Infof("DRA: interface=%q %s podClaimName=%q requestName=%q: SUCCESS socketPath=%q",
+				ifaceName, a.claimType, ref.PodClaimName, ref.RequestName, meta.SocketPath)
+			return meta, nil
 		}
+
+		log.Log.Warningf("DRA: interface=%q %s podClaimName=%q requestName=%q: FAILED: %v",
+			ifaceName, a.claimType, ref.PodClaimName, ref.RequestName, err)
 	}
 
-	return SocketMetadata{}, "", fmt.Errorf("no DRA metadata found for interface %q (tried all resource names and claim types): %v",
-		ifaceName, allErrs)
+	return SocketMetadata{}, fmt.Errorf("no DRA metadata found for interface %q (podClaimName=%q requestName=%q): tried ResourceClaim and ResourceClaimTemplate",
+		ifaceName, ref.PodClaimName, ref.RequestName)
 }

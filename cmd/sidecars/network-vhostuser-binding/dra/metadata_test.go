@@ -123,58 +123,85 @@ var _ = Describe("Reader", func() {
 
 var _ = Describe("ResolveForInterface", func() {
 	const (
-		ifaceName  = "net1"
-		socketPath = "/var/run/vhost-user/abc12/vhost.sock"
+		ifaceName    = "net1"
+		podClaimName = "my-claim"
+		requestName  = "vhost-port"
+		socketPath   = "/var/run/vhost-user/abc12/vhost.sock"
 	)
 
-	// requestName="*" is passed as a path segment; filepath.Glob then expands
-	// it so that any request subdirectory matches. This means "*" succeeds
-	// whenever any request directory with a metadata file exists, regardless
-	// of the actual request name used by the driver.
+	ref := dra.ResourceRef{PodClaimName: podClaimName, RequestName: requestName}
 
-	It("succeeds with '*' for a ResourceClaim when any request directory exists", func() {
-		root := writeMetadataFile("resourceclaims", ifaceName, "vhost-user", socketPath)
+	It("resolves via ResourceClaim", func() {
+		root := writeMetadataFile("resourceclaims", podClaimName, requestName, socketPath)
 		reader := dra.Reader{BaseDir: root}
 
-		meta, resourceNameUsed, err := dra.ResolveForInterface(reader, ifaceName)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(meta.SocketPath).To(Equal(socketPath))
-		Expect(resourceNameUsed).To(Equal("*"))
-	})
-
-	It("succeeds with '*' for a ResourceClaimTemplate when no ResourceClaim exists", func() {
-		root := writeMetadataFile("resourceclaimtemplates", ifaceName, "vhost-user", socketPath)
-		reader := dra.Reader{BaseDir: root}
-
-		meta, resourceNameUsed, err := dra.ResolveForInterface(reader, ifaceName)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(meta.SocketPath).To(Equal(socketPath))
-		Expect(resourceNameUsed).To(Equal("*"))
-	})
-
-	It("falls back to 'vhost-user' when '*' glob finds no subdirectories but exact name matches", func() {
-		// Simulate a driver that names its request "vhost-user" but the claim
-		// directory has no subdirectories visible to the "*" glob (e.g. the
-		// directory itself is absent). Only the exact "vhost-user" path exists.
-		// We achieve this by having no resourceclaims dir at all, and a
-		// resourceclaimtemplates dir where the only subdir is "vhost-user" —
-		// but since "*" glob WILL match "vhost-user", we instead test the
-		// "vhost-user" path directly via ReadClaim/ReadClaimTemplate.
-		// This test verifies that ReadClaim with "vhost-user" works correctly.
-		root := writeMetadataFile("resourceclaims", ifaceName, "vhost-user", socketPath)
-		reader := dra.Reader{BaseDir: root}
-
-		meta, err := reader.ReadClaim(ifaceName, "vhost-user")
+		meta, err := dra.ResolveForInterface(reader, ifaceName, ref)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(meta.SocketPath).To(Equal(socketPath))
 	})
 
-	It("returns an error when no metadata exists for any resource name or claim type", func() {
+	It("resolves via ResourceClaimTemplate when no ResourceClaim exists", func() {
+		root := writeMetadataFile("resourceclaimtemplates", podClaimName, requestName, socketPath)
+		reader := dra.Reader{BaseDir: root}
+
+		meta, err := dra.ResolveForInterface(reader, ifaceName, ref)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(meta.SocketPath).To(Equal(socketPath))
+	})
+
+	It("returns an error when neither ResourceClaim nor ResourceClaimTemplate exists", func() {
 		reader := dra.Reader{BaseDir: GinkgoT().TempDir()}
 
-		_, _, err := dra.ResolveForInterface(reader, ifaceName)
+		_, err := dra.ResolveForInterface(reader, ifaceName, ref)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("no DRA metadata found"))
 		Expect(err.Error()).To(ContainSubstring(ifaceName))
+	})
+})
+
+var _ = Describe("ParseAnnotations", func() {
+	It("parses valid annotations into ResourceRefs", func() {
+		annotations := map[string]string{
+			"resource.vhost-user-binding-plugin.io/foo": "my-claim/vhost1",
+			"resource.vhost-user-binding-plugin.io/bar": "my-claim/vhost2",
+			"some.other.annotation/foo":                 "ignored",
+		}
+
+		refs, err := dra.ParseAnnotations(annotations)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(refs).To(HaveLen(2))
+		Expect(refs["foo"]).To(Equal(dra.ResourceRef{PodClaimName: "my-claim", RequestName: "vhost1"}))
+		Expect(refs["bar"]).To(Equal(dra.ResourceRef{PodClaimName: "my-claim", RequestName: "vhost2"}))
+	})
+
+	It("returns an empty map when no matching annotations exist", func() {
+		refs, err := dra.ParseAnnotations(map[string]string{"unrelated": "value"})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(refs).To(BeEmpty())
+	})
+
+	It("returns an error for a malformed annotation value", func() {
+		annotations := map[string]string{
+			"resource.vhost-user-binding-plugin.io/foo": "no-slash-here",
+		}
+		_, err := dra.ParseAnnotations(annotations)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("invalid value"))
+	})
+
+	It("returns an error when podClaimName is empty", func() {
+		annotations := map[string]string{
+			"resource.vhost-user-binding-plugin.io/foo": "/requestName",
+		}
+		_, err := dra.ParseAnnotations(annotations)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("returns an error when requestName is empty", func() {
+		annotations := map[string]string{
+			"resource.vhost-user-binding-plugin.io/foo": "claimName/",
+		}
+		_, err := dra.ParseAnnotations(annotations)
+		Expect(err).To(HaveOccurred())
 	})
 })

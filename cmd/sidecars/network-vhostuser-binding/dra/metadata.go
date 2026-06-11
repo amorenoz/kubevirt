@@ -20,10 +20,11 @@
 // Package dra provides DRA (Dynamic Resource Allocation) metadata reading
 // for the vhost-user binding plugin.
 //
-// The central type is [Reader], which reads device metadata files from a
-// configurable base directory. In production the base directory is
-// [ContainerDir] (the well-known KEP-5304 mount point). Tests override it
-// with a temporary directory containing pre-created metadata files.
+// The central type is [Reader], which reads device metadata files.
+// In production (BaseDir empty) it delegates directly to the upstream
+// k8s.io/dynamic-resource-allocation/devicemetadata library.
+// In tests, BaseDir is set to a temporary directory that mirrors the real
+// DRA mount layout, allowing tests to run without a live cluster.
 package dra
 
 import (
@@ -34,7 +35,6 @@ import (
 
 	"k8s.io/dynamic-resource-allocation/api/metadata"
 	"k8s.io/dynamic-resource-allocation/devicemetadata"
-	"kubevirt.io/client-go/log"
 )
 
 // ContainerDir is the well-known in-container directory where the kubelet
@@ -44,7 +44,7 @@ const ContainerDir = metadata.ContainerDir
 
 // SocketAttributeKey is the device attribute key that the vhost-user DRA
 // driver uses to publish the socket path.
-const SocketAttributeKey = "socketPath"
+const SocketAttributeKey = "vhost-user-path"
 
 // SocketMetadata is the minimal data the vhost-user binding plugin needs
 // from a DRA device allocation.
@@ -53,43 +53,53 @@ type SocketMetadata struct {
 	SocketPath string
 }
 
-// Reader reads DRA device metadata files from BaseDir.
+// Reader reads DRA device metadata files.
 //
-// In production, leave BaseDir empty and it defaults to [ContainerDir].
-// In tests, set BaseDir to a temporary directory containing pre-created
-// metadata files with the same layout as the real DRA mount:
+// Leave BaseDir empty in production — ReadClaim and ReadClaimTemplate will
+// delegate directly to the upstream library, which reads from [ContainerDir].
+//
+// In tests, set BaseDir to a temporary directory with the same layout as the
+// real DRA mount:
 //
 //	<BaseDir>/resourceclaims/<claimName>/<requestName>/<driver>-metadata.json
 //	<BaseDir>/resourceclaimtemplates/<podClaimName>/<requestName>/<driver>-metadata.json
 type Reader struct {
-	// BaseDir overrides the default [ContainerDir]. Leave empty in production.
+	// BaseDir overrides [ContainerDir]. Leave empty in production.
 	BaseDir string
 }
 
-func (r Reader) baseDir() string {
-	if r.BaseDir != "" {
-		return r.BaseDir
-	}
-	return ContainerDir
-}
-
 // ReadClaim reads metadata for a directly-referenced ResourceClaim.
-// claimName must equal the interface name (strict-validation requirement).
-// requestName is the DRA request name within the claim (e.g. "*" or "vhost-user").
+// In production it calls [devicemetadata.ReadResourceClaimMetadata] directly.
+// In tests it reads from BaseDir.
 func (r Reader) ReadClaim(claimName, requestName string) (SocketMetadata, error) {
-	dir := filepath.Join(r.baseDir(), metadata.ResourceClaimsSubDir, claimName, requestName)
+	if r.BaseDir == "" {
+		dm, err := devicemetadata.ReadResourceClaimMetadata(claimName, requestName)
+		if err != nil {
+			return SocketMetadata{}, err
+		}
+		return extractSocketMetadata(dm)
+	}
+	dir := filepath.Join(r.BaseDir, metadata.ResourceClaimsSubDir, claimName, requestName)
 	return readDir(dir)
 }
 
 // ReadClaimTemplate reads metadata for a ResourceClaimTemplate-generated claim.
-// podClaimName must equal the interface name (strict-validation requirement).
-// requestName is tried in the same order as ReadClaim.
+// In production it calls [devicemetadata.ReadResourceClaimTemplateMetadata] directly.
+// In tests it reads from BaseDir.
 func (r Reader) ReadClaimTemplate(podClaimName, requestName string) (SocketMetadata, error) {
-	dir := filepath.Join(r.baseDir(), metadata.ResourceClaimTemplatesSubDir, podClaimName, requestName)
+	if r.BaseDir == "" {
+		dm, err := devicemetadata.ReadResourceClaimTemplateMetadata(podClaimName, requestName)
+		if err != nil {
+			return SocketMetadata{}, err
+		}
+		return extractSocketMetadata(dm)
+	}
+	dir := filepath.Join(r.BaseDir, metadata.ResourceClaimTemplatesSubDir, podClaimName, requestName)
 	return readDir(dir)
 }
 
-// readDir globs for "*-metadata.json" files in dir and decodes the first one found.
+// readDir globs for "*-metadata.json" files in dir and decodes the first one.
+// Used only when BaseDir is set (tests).
 func readDir(dir string) (SocketMetadata, error) {
 	matches, err := filepath.Glob(filepath.Join(dir, "*"+metadata.MetadataFileSuffix))
 	if err != nil {
@@ -97,9 +107,6 @@ func readDir(dir string) (SocketMetadata, error) {
 	}
 	if len(matches) == 0 {
 		return SocketMetadata{}, fmt.Errorf("no metadata files found in %s", dir)
-	}
-	if len(matches) > 1 {
-		log.Log.Warningf("more than one resource!")
 	}
 	return readSocketMetadataFromFile(matches[0])
 }
@@ -122,7 +129,7 @@ func extractSocketMetadata(dm *metadata.DeviceMetadata) (SocketMetadata, error) 
 }
 
 // readSocketMetadataFromFile decodes a single metadata JSON file and extracts
-// the socket path.
+// the socket path. Used only when BaseDir is set (tests).
 func readSocketMetadataFromFile(path string) (SocketMetadata, error) {
 	f, err := os.Open(path)
 	if err != nil {

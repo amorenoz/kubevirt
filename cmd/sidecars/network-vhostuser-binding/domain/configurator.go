@@ -33,7 +33,6 @@ import (
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/network/downwardapi"
-	"kubevirt.io/kubevirt/pkg/network/namescheme"
 	domainschema "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 	"kubevirt.io/network-vhostuser-binding/dra"
@@ -47,7 +46,7 @@ type vhostNetworkData struct {
 type VhostUserNetworkConfigurator struct {
 	vhostIfaces []*vmschema.Interface
 	opts        VhostUserConfiguratorOptions
-	networkData map[string]vhostNetworkData // data extracted from Downward API
+	networkData map[string]vhostNetworkData
 }
 
 type VhostUserConfiguratorOptions struct {
@@ -56,9 +55,6 @@ type VhostUserConfiguratorOptions struct {
 	// netInfoOverride, when set, overrides the default downward API network-info
 	// file path. Intended for testing only.
 	netInfoOverride string
-	// socketDirOverride, when set, overrides VhostUserSocketDir.
-	// Intended for testing only.
-	socketDirOverride string
 	// draBaseDirOverride, when set, overrides the default DRA metadata
 	// directory [dra.ContainerDir]. Intended for testing only.
 	draBaseDirOverride string
@@ -68,12 +64,6 @@ type VhostUserConfiguratorOptions struct {
 // This is intended for testing; production code should leave it unset.
 func (o *VhostUserConfiguratorOptions) SetNetInfoOverride(path string) {
 	o.netInfoOverride = path
-}
-
-// SetSocketDirOverride overrides the default vhost-user socket symlink directory.
-// This is intended for testing.
-func (o *VhostUserConfiguratorOptions) SetSocketDirOverride(dir string) {
-	o.socketDirOverride = dir
 }
 
 // SetDRABaseDirOverride overrides the default DRA metadata directory.
@@ -87,13 +77,11 @@ const (
 	VhostUserPluginName = "vhostuser"
 	// VhostUserLogFilePath vhost-user log file path Kubevirt consume and record
 	VhostUserLogFilePath = "/var/run/kubevirt/vhost-user.log"
-	// Directory where the binding will symlink sockets.
-	VhostUserSocketDir = "/var/run/kubevirt-hooks/"
 	// QueueSize is the TX/RX queue size for vhost-user interfaces.
 	QueueSize uint32 = 1024
 )
 
-func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, opts VhostUserConfiguratorOptions) (*VhostUserNetworkConfigurator, error) {
+func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vmschema.Network, annotations map[string]string, opts VhostUserConfiguratorOptions) (*VhostUserNetworkConfigurator, error) {
 
 	vhostIfaces := make([]*vmschema.Interface, 0)
 	for _, iface := range ifaces {
@@ -106,7 +94,7 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 		return nil, fmt.Errorf("no vhost interfaces found")
 	}
 
-	networkData, err := resolveNetworkData(vhostIfaces, networks, opts)
+	networkData, err := resolveNetworkData(vhostIfaces, annotations, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +109,7 @@ func NewVhostUserNetworkConfigurator(ifaces []vmschema.Interface, networks []vms
 // resolveNetworkData determines the socket path for each vhost-user interface.
 // It prefers DRA (KEP-5304) when a reader is available, falling back to the
 // downward API otherwise.
-func resolveNetworkData(vhostIfaces []*vmschema.Interface, networks []vmschema.Network, opts VhostUserConfiguratorOptions) (map[string]vhostNetworkData, error) {
+func resolveNetworkData(vhostIfaces []*vmschema.Interface, annotations map[string]string, opts VhostUserConfiguratorOptions) (map[string]vhostNetworkData, error) {
 	baseDir := opts.draBaseDirOverride
 	if baseDir == "" {
 		baseDir = dra.ContainerDir
@@ -129,10 +117,11 @@ func resolveNetworkData(vhostIfaces []*vmschema.Interface, networks []vmschema.N
 
 	if _, err := os.Stat(baseDir); err == nil {
 		log.Log.Infof("DRA: metadata directory %q present, attempting DRA discovery", baseDir)
-		// Map VMI logical network names to their hashed pod interface names,
-		// which is what the DRA claim is named after.
-		podIfaceNames := namescheme.CreateHashedNetworkNameScheme(networks)
-		data, err := readDRANetworkData(vhostIfaces, podIfaceNames, dra.Reader{BaseDir: baseDir})
+		resourceRefs, err := dra.ParseAnnotations(annotations)
+		if err != nil {
+			return nil, fmt.Errorf("DRA: failed to parse annotations: %w", err)
+		}
+		data, err := readDRANetworkData(vhostIfaces, resourceRefs, dra.Reader{BaseDir: baseDir})
 		if err == nil {
 			log.Log.Infof("DRA: socket discovery succeeded for all interfaces")
 			return data, nil
@@ -157,22 +146,18 @@ func resolveNetworkData(vhostIfaces []*vmschema.Interface, networks []vmschema.N
 // readDRANetworkData resolves the socket path for every vhost-user interface
 // via DRA metadata. Returns an error if any interface cannot be resolved so
 // that the caller can fall back to the downward API.
-// podIfaceNames maps VMI logical network name → hashed pod interface name,
-// which is the name the DRA claim is registered under.
-func readDRANetworkData(vhostIfaces []*vmschema.Interface, podIfaceNames map[string]string, reader dra.Reader) (map[string]vhostNetworkData, error) {
+func readDRANetworkData(vhostIfaces []*vmschema.Interface, resourceRefs map[string]dra.ResourceRef, reader dra.Reader) (map[string]vhostNetworkData, error) {
 	result := make(map[string]vhostNetworkData, len(vhostIfaces))
 	for _, iface := range vhostIfaces {
-		podIfaceName, ok := podIfaceNames[iface.Name]
+		ref, ok := resourceRefs[iface.Name]
 		if !ok {
-			return nil, fmt.Errorf("interface %q: no pod interface name found", iface.Name)
+			return nil, fmt.Errorf("interface %q: no DRA annotation found (expected %s%s)",
+				iface.Name, dra.AnnotationPrefix, iface.Name)
 		}
-		log.Log.Infof("DRA: interface=%q maps to pod interface name %q", iface.Name, podIfaceName)
-		meta, resourceNameUsed, err := dra.ResolveForInterface(reader, podIfaceName)
+		meta, err := dra.ResolveForInterface(reader, iface.Name, ref)
 		if err != nil {
-			return nil, fmt.Errorf("interface %q (pod iface %q): %w", iface.Name, podIfaceName, err)
+			return nil, fmt.Errorf("interface %q: %w", iface.Name, err)
 		}
-		log.Log.Infof("DRA: interface=%q resolved via requestName=%q socketPath=%q",
-			iface.Name, resourceNameUsed, meta.SocketPath)
 		result[iface.Name] = vhostNetworkData{socketPath: meta.SocketPath}
 	}
 	return result, nil
@@ -228,47 +213,6 @@ func (p VhostUserNetworkConfigurator) Mutate(domainSpec *domainschema.DomainSpec
 	return domainSpecCopy, nil
 }
 
-func (p VhostUserNetworkConfigurator) getVhostUserPath(iface *vmschema.Interface) (string, error) {
-	data, ok := p.networkData[iface.Name]
-	if !ok {
-		return "", fmt.Errorf("vhost user path for interface %s not found", iface.Name)
-	}
-	sockFile := path.Base(data.socketPath)
-	sockDir := path.Dir(data.socketPath)
-
-	// Vhost-user socket paths might contain deployment-specific strings if they come from a DevicePlugin.
-	// These bits would change when another pod is deployed for the same VM, i.e: during live-migration, leading
-	// to a different libvirt XML. In order to avoid this, symlink the sockets to well-known paths that will
-	// remain stable across migrations.
-	socketDir := VhostUserSocketDir
-	if p.opts.socketDirOverride != "" {
-		socketDir = p.opts.socketDirOverride
-	}
-
-	if err := os.MkdirAll(socketDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create vhost-user socket directory: %w", err)
-	}
-
-	symlinkPath := path.Join(socketDir, iface.Name)
-	if _, err := os.Lstat(symlinkPath); err == nil {
-		log.Log.Warningf("Removing existing symlink for interface %s at %s", iface.Name, symlinkPath)
-		if err := os.Remove(symlinkPath); err != nil {
-			return "", fmt.Errorf("failed to remove existing symlink: %w", err)
-		}
-	}
-
-	if err := os.Symlink(sockDir, symlinkPath); err != nil {
-		return "", fmt.Errorf("failed to create symlink for socket: %w", err)
-	}
-
-	// We get a volume's subpath based on the CONTAINER_NAME while the launcher container
-	// gets the full volume. Append CONTAINER_NAME to the path we tell libvirt to use.
-	if env := os.Getenv("CONTAINER_NAME"); env != "" {
-		symlinkPath = path.Join(socketDir, env, iface.Name)
-	}
-
-	return path.Join(symlinkPath, sockFile), nil
-}
 
 func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.Interface) (*domainschema.Interface, error) {
 	var pciAddress *domainschema.Address
@@ -298,10 +242,9 @@ func (p VhostUserNetworkConfigurator) generateDomainInterface(iface *vmschema.In
 		acpi = &domainschema.ACPI{Index: uint(iface.ACPIIndex)}
 	}
 
-	//vhostUserPath, err := p.getVhostUserPath(iface)
 	data, ok := p.networkData[iface.Name]
 	if !ok {
-		return nil, fmt.Errorf("No network data for interface %s", iface.Name)
+		return nil, fmt.Errorf("vhost user path for interface %s not found", iface.Name)
 	}
 	vhostUserPath := data.socketPath
 	queueSize := uint(QueueSize)
